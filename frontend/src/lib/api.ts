@@ -6555,6 +6555,7 @@ const api = {
                 requestId: string
                 optionId: string
                 customInput?: string
+                traceId?: string
             }
         ): Promise<{ status: string }> {
             return new ApiRequest().conversation(conversationId).withAction('permission').create({ data })

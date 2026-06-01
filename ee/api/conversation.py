@@ -107,6 +107,12 @@ class PermissionResponseSerializer(serializers.Serializer):
         max_length=10000,
         help_text="Optional feedback text sent with a 'reject_with_feedback' decision.",
     )
+    traceId = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        max_length=200,
+        help_text="Trace id the client associated with the run, for PERMISSION_RESPONDED telemetry correlation.",
+    )
 
 
 class PermissionResponseResultSerializer(serializers.Serializer):
@@ -723,6 +729,7 @@ class ConversationViewSet(
         request_id = serializer.validated_data["requestId"]
         option_id = serializer.validated_data["optionId"]
         custom_input = serializer.validated_data.get("customInput")
+        trace_id = serializer.validated_data.get("traceId")
 
         result = send_permission_response(
             task_run,
@@ -739,6 +746,7 @@ class ConversationViewSet(
                 event="permission_responded",
                 properties={
                     "conversation_id": str(conversation.id),
+                    "trace_id": trace_id,
                     "request_id": request_id,
                     "option_id": option_id,
                     "execution_type": "sandbox",

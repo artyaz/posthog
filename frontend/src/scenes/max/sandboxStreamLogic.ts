@@ -228,8 +228,20 @@ export const sandboxStreamLogic = kea<sandboxStreamLogicType>([
          * products/tasks `logs/` endpoint, then open SSE if the run is non-terminal. `justCreatedRun`
          * skips the `logs/` round-trip (fresh-run fast path — nothing historical to assemble).
          */
-        bootstrapRun: (payload: { taskId: string; runId: string; justCreatedRun?: boolean }) => payload,
-        openSseForRun: (payload: { taskId: string; runId: string; startLatest?: boolean }) => payload,
+        bootstrapRun: (payload: {
+            taskId: string
+            runId: string
+            justCreatedRun?: boolean
+            conversationId?: string
+            traceId?: string
+        }) => payload,
+        openSseForRun: (payload: {
+            taskId: string
+            runId: string
+            startLatest?: boolean
+            conversationId?: string
+            traceId?: string
+        }) => payload,
         closeSse: true,
         sseConnecting: true,
         sseOpened: true,
@@ -308,6 +320,23 @@ export const sandboxStreamLogic = kea<sandboxStreamLogicType>([
                 openSseForRun: () => 'queued',
                 handleTerminalStatus: (_, { status }) => status,
                 reset: () => null,
+            },
+        ],
+        // Conversation + trace correlation for the telemetry inventory (02_CORE.md § 10). The SSE
+        // bypasses Django, so the frontend supplies these — it knows the trace_id it sent with
+        // POST /sandbox/ and the conversation it opened the run against.
+        runContext: [
+            { conversationId: undefined, traceId: undefined } as { conversationId?: string; traceId?: string },
+            {
+                bootstrapRun: (state, { conversationId, traceId }) => ({
+                    conversationId: conversationId ?? state.conversationId,
+                    traceId: traceId ?? state.traceId,
+                }),
+                openSseForRun: (state, { conversationId, traceId }) => ({
+                    conversationId: conversationId ?? state.conversationId,
+                    traceId: traceId ?? state.traceId,
+                }),
+                reset: () => ({ conversationId: undefined, traceId: undefined }),
             },
         ],
         toolInvocations: [
@@ -570,6 +599,8 @@ export const sandboxStreamLogic = kea<sandboxStreamLogicType>([
             // correlated by the caller (the SSE bypasses Django); emit what this logic knows.
             const activeRun = cache.activeRun as { taskId: string; runId: string } | undefined
             posthog.capture('permission_requested', {
+                conversation_id: values.runContext.conversationId,
+                trace_id: values.runContext.traceId,
                 request_id: record.requestId,
                 tool_call_name: record.rawToolCall.resolvedKey,
                 tool_call_id: record.toolCallId,
@@ -580,20 +611,38 @@ export const sandboxStreamLogic = kea<sandboxStreamLogicType>([
         },
         respondToPermission: async ({ conversationId, requestId, optionId, customInput }) => {
             try {
+                // PERMISSION_RESPONDED telemetry is emitted server-side by the /permission/ handler;
+                // forward the trace_id so it can correlate (02_CORE.md § 10 — I3.8 omitted it).
                 await api.conversations.permission(conversationId, {
                     requestId,
                     optionId,
                     customInput,
+                    traceId: values.runContext.traceId,
                 })
             } catch (error) {
                 posthog.captureException(error)
                 actions.handleStreamError({ errorTitle: 'Failed to send approval', retryable: true })
             }
         },
-        handleTerminalStatus: () => {
+        handleTerminalStatus: ({ status, errorMessage }) => {
             // A terminal run has no more frames — close the SSE and stop any pending reconnect.
             cache.disposables.dispose('reconnect-backoff')
             cache.disposables.dispose('event-source')
+
+            // TASK_RUN_TERMINATED telemetry (02_CORE.md § 10). `duration_ms` is measured from the
+            // `_posthog/run_started` frame; absent if the run terminated before one was seen.
+            const activeRun = cache.activeRun as { taskId: string; runId: string } | undefined
+            const startedAt = cache.runStartedAtMs as number | undefined
+            posthog.capture('task_run_terminated', {
+                conversation_id: values.runContext.conversationId,
+                trace_id: values.runContext.traceId,
+                run_id: activeRun?.runId,
+                task_id: activeRun?.taskId,
+                status,
+                error_message: errorMessage ?? undefined,
+                execution_type: 'sandbox',
+                duration_ms: startedAt !== undefined ? Date.now() - startedAt : undefined,
+            })
         },
         closeSse: () => {
             cache.disposables.dispose('reconnect-backoff')
@@ -601,6 +650,7 @@ export const sandboxStreamLogic = kea<sandboxStreamLogicType>([
         },
         reset: () => {
             cache.activeRun = undefined
+            cache.runStartedAtMs = undefined
             cache.disposables.dispose('reconnect-backoff')
             cache.disposables.dispose('event-source')
         },
@@ -622,6 +672,21 @@ export const sandboxStreamLogic = kea<sandboxStreamLogicType>([
 
             // Custom `_posthog/*` namespace — § 6.3.
             if (method === '_posthog/run_started') {
+                // TASK_RUN_STARTED telemetry (02_CORE.md § 10) — emit once per run on the first
+                // `_posthog/run_started` frame. `cold_start` is true unless the run was pre-warmed.
+                if (!values.runStarted) {
+                    const activeRun = cache.activeRun as { taskId: string; runId: string } | undefined
+                    cache.runStartedAtMs = Date.now()
+                    const coldStart = params.cold_start ?? params.coldStart
+                    posthog.capture('task_run_started', {
+                        conversation_id: values.runContext.conversationId,
+                        trace_id: values.runContext.traceId,
+                        run_id: activeRun?.runId,
+                        task_id: activeRun?.taskId,
+                        execution_type: 'sandbox',
+                        cold_start: typeof coldStart === 'boolean' ? coldStart : true,
+                    })
+                }
                 actions.markRunStarted()
                 return
             }
@@ -696,8 +761,9 @@ export const sandboxStreamLogic = kea<sandboxStreamLogicType>([
                         : Array.isArray(update.content)
                           ? update.content
                           : []
+                    const nextStatus = mapAcpStatus(update.status ?? existing?.status)
                     actions.updateToolInvocation(toolCallId, {
-                        status: mapAcpStatus(update.status ?? existing?.status),
+                        status: nextStatus,
                         title: (update.title as string | undefined) ?? existing?.title,
                         progress: update.progress ?? existing?.progress,
                         output: update.rawOutput ?? existing?.output,
@@ -705,6 +771,25 @@ export const sandboxStreamLogic = kea<sandboxStreamLogicType>([
                             (update.locations as { path: string; line?: number }[] | undefined) ?? existing?.locations,
                         contentBlocks: mergedContent,
                     })
+                    // TOOL_CALL_COMPLETED telemetry (02_CORE.md § 10, optional) — emit once when a tool
+                    // call first transitions to a terminal status. `duration_ms` is measured from the
+                    // run start since per-tool start timing isn't carried on the wire.
+                    if (
+                        (nextStatus === 'completed' || nextStatus === 'failed') &&
+                        existing?.status !== 'completed' &&
+                        existing?.status !== 'failed'
+                    ) {
+                        const startedAt = cache.runStartedAtMs as number | undefined
+                        posthog.capture('tool_call_completed', {
+                            conversation_id: values.runContext.conversationId,
+                            trace_id: values.runContext.traceId,
+                            tool_call_id: toolCallId,
+                            tool_qualified_name: existing?.resolvedKey,
+                            status: nextStatus,
+                            duration_ms: startedAt !== undefined ? Date.now() - startedAt : undefined,
+                            execution_type: 'sandbox',
+                        })
+                    }
                     break
                 }
                 case 'current_mode_update': {

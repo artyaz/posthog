@@ -58,6 +58,32 @@ class TestConversationPermission(APIBaseTest):
         _, kwargs = mock_send.call_args
         self.assertEqual(kwargs["custom_input"], "try harder")
 
+    def test_permission_responded_telemetry_includes_trace_id(self):
+        run = self._create_run()
+        conversation = Conversation.objects.create(user=self.user, team=self.team, task=run.task)
+
+        with (
+            patch(
+                "ee.api.conversation.send_permission_response",
+                return_value=CommandResult(success=True, status_code=200, data={}),
+            ),
+            patch("ee.api.conversation.posthoganalytics.capture") as mock_capture,
+        ):
+            self.client.post(
+                f"/api/environments/{self.team.id}/conversations/{conversation.id}/permission/",
+                {"requestId": "req-3", "optionId": "allow_once", "traceId": "trace-42"},
+                format="json",
+            )
+
+        mock_capture.assert_called_once()
+        self.assertEqual(mock_capture.call_args.kwargs["event"], "permission_responded")
+        props = mock_capture.call_args.kwargs["properties"]
+        self.assertEqual(props["trace_id"], "trace-42")
+        self.assertEqual(props["request_id"], "req-3")
+        self.assertEqual(props["option_id"], "allow_once")
+        self.assertEqual(props["execution_type"], "sandbox")
+        self.assertEqual(props["conversation_id"], str(conversation.id))
+
     def test_permission_400_when_no_sandbox_run(self):
         conversation = Conversation.objects.create(user=self.user, team=self.team)
         response = self.client.post(

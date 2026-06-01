@@ -175,7 +175,17 @@ class TestHandleSandboxMessage(APIBaseTest):
         logged_entries = m_append.call_args[0][0]
         meta = logged_entries[0]["notification"]["params"]["_meta"]
         assert meta["attached_context"] == [{"type": "insight", "id": "abc"}]
+
+        # PROMPT_SENT carries full sandbox-path field parity (02_CORE § 10).
         m_telemetry.assert_called_once()
+        telemetry_props = m_telemetry.call_args[0][2]
+        assert telemetry_props["execution_type"] == "sandbox"
+        assert telemetry_props["agent_runtime"] == "sandbox"
+        assert telemetry_props["just_created_run"] is False
+        assert telemetry_props["trace_id"] == "trace-2"
+        assert telemetry_props["conversation_id"] == str(self.conversation.id)
+        assert telemetry_props["has_attached_context"] is True
+        assert telemetry_props["attached_context_count"] == 1
 
     def test_terminal_followup_creates_new_run_with_resume(self):
         task, run = self._stub_task()

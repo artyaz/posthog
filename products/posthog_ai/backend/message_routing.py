@@ -52,6 +52,38 @@ _INTEGER_ID_TYPES: frozenset[str] = frozenset({"dashboard", "action"})
 _IN_PROGRESS_STATUSES: frozenset[str] = frozenset({TaskRun.Status.QUEUED, TaskRun.Status.IN_PROGRESS})
 
 
+def _report_prompt_sent(
+    *,
+    request: Request,
+    conversation: "Conversation",
+    team: Team,
+    user: User,
+    trace_id: str | None,
+    just_created_run: bool,
+    attached_context: list[AttachedContext],
+) -> None:
+    """Emit the `PROMPT_SENT` analytics event with sandbox-path field parity (02_CORE § 10).
+
+    Carries `execution_type` + `agent_runtime` plus the attached-context summary so
+    dashboards filtering on the LangGraph emission keep working unchanged.
+    """
+    report_user_action(
+        user,
+        "prompt sent",
+        {
+            "trace_id": trace_id,
+            "conversation_id": str(conversation.id),
+            "execution_type": "sandbox",
+            "agent_runtime": "sandbox",
+            "just_created_run": just_created_run,
+            "has_attached_context": len(attached_context) > 0,
+            "attached_context_count": len(attached_context),
+        },
+        team=team,
+        request=request,
+    )
+
+
 def handle_sandbox_message(request: Request, conversation: "Conversation") -> Response:
     """Route a sandbox-runtime message to a products/tasks Run, in-process.
 
@@ -177,17 +209,14 @@ def _handle_first_message(
         create_pr=False,
     )
 
-    report_user_action(
-        user,
-        "prompt sent",
-        {
-            "trace_id": trace_id,
-            "conversation_id": str(conversation.id),
-            "execution_type": "sandbox",
-            "just_created_run": True,
-        },
-        team=team,
+    _report_prompt_sent(
         request=request,
+        conversation=conversation,
+        team=team,
+        user=user,
+        trace_id=trace_id,
+        just_created_run=True,
+        attached_context=attached_context,
     )
 
     return Response(
@@ -224,17 +253,14 @@ def _handle_in_progress_followup(
 
     _log_user_message(run, wrapped, attached_context)
 
-    report_user_action(
-        user,
-        "prompt sent",
-        {
-            "trace_id": trace_id,
-            "conversation_id": str(conversation.id),
-            "execution_type": "sandbox",
-            "just_created_run": False,
-        },
-        team=team,
+    _report_prompt_sent(
         request=request,
+        conversation=conversation,
+        team=team,
+        user=user,
+        trace_id=trace_id,
+        just_created_run=False,
+        attached_context=attached_context,
     )
 
     return Response(
@@ -311,17 +337,14 @@ def _handle_terminal_resume(
     if followup_run is not None:
         signal_task_followup_message(followup_run.workflow_id, wrapped, artifact_ids=[])
         _log_user_message(followup_run, wrapped, attached_context)
-        report_user_action(
-            user,
-            "prompt sent",
-            {
-                "trace_id": trace_id,
-                "conversation_id": str(conversation.id),
-                "execution_type": "sandbox",
-                "just_created_run": False,
-            },
-            team=team,
+        _report_prompt_sent(
             request=request,
+            conversation=conversation,
+            team=team,
+            user=user,
+            trace_id=trace_id,
+            just_created_run=False,
+            attached_context=attached_context,
         )
         return Response(
             {
@@ -347,17 +370,14 @@ def _handle_terminal_resume(
         create_pr=False,
     )
 
-    report_user_action(
-        user,
-        "prompt sent",
-        {
-            "trace_id": trace_id,
-            "conversation_id": str(conversation.id),
-            "execution_type": "sandbox",
-            "just_created_run": True,
-        },
-        team=team,
+    _report_prompt_sent(
         request=request,
+        conversation=conversation,
+        team=team,
+        user=user,
+        trace_id=trace_id,
+        just_created_run=True,
+        attached_context=attached_context,
     )
 
     return Response(

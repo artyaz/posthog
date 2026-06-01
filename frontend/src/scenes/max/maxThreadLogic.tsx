@@ -3,6 +3,7 @@ import {
     BuiltLogic,
     actions,
     afterMount,
+    beforeUnmount,
     connect,
     kea,
     key,
@@ -646,6 +647,9 @@ export const maxThreadLogic = kea<maxThreadLogicType>([
                             runId: run_id,
                             // Fresh runs need everything from the top; follow-ups resume from latest.
                             startLatest: !just_created_run,
+                            // Correlate SSE-side telemetry with the trace this run was sent under (§ 10).
+                            conversationId,
+                            traceId,
                         })
                     }
                 } catch (e) {
@@ -1863,6 +1867,32 @@ export const maxThreadLogic = kea<maxThreadLogicType>([
             return
         }
 
+        // Sandbox history-load branch (02_CORE.md §§ 4.7, 7.2). Sandbox conversations don't persist
+        // messages Django-side — history lives in S3 ACP logs, read via the products/tasks logs/
+        // endpoint. Hand off to sandboxStreamLogic, which replays logs/ then opens SSE if non-terminal.
+        // The LangGraph reconnect path below is never entered for sandbox runtimes (coexistence).
+        if (conversation.agent_runtime === 'sandbox') {
+            // Lazily mount the sandbox stream + context singletons for this conversation; unmounted in
+            // beforeUnmount. Mounting is ref-counted, so a no-op if a component already mounted them.
+            cache.sandboxStreamUnmount = sandboxStreamLogic.mount()
+            cache.posthogAiContextUnmount = posthogAiContextLogic.mount()
+
+            // Reset per-conversation stream + context state before replaying this conversation's history.
+            sandboxStreamLogic.actions.reset()
+            posthogAiContextLogic.actions.clearAttachments()
+            if (conversation.task) {
+                const runId = conversation.task.current_run_id
+                if (runId) {
+                    sandboxStreamLogic.actions.bootstrapRun({
+                        taskId: conversation.task.id,
+                        runId,
+                        conversationId: conversation.id,
+                    })
+                }
+            }
+            return
+        }
+
         // Ensure threadRaw is hydrated before streaming, so setThread doesn't overwrite stream tokens.
         if (values.threadRaw.length === 0 && conversation.messages.length > 0) {
             actions.setThread(updateMessagesWithCompletedStatus(conversation.messages))
@@ -1877,6 +1907,20 @@ export const maxThreadLogic = kea<maxThreadLogicType>([
         ) {
             actions.reconnectToStream()
         }
+    }),
+
+    // Tear down the singleton sandbox stream on conversation change (this logic is keyed per
+    // conversation, so unmount = the user navigated away). Closes the SSE and clears thread state
+    // so the next sandbox conversation starts clean. No-op for LangGraph conversations.
+    beforeUnmount(({ values, cache }) => {
+        if (values.conversation?.agent_runtime === 'sandbox' && sandboxStreamLogic.isMounted()) {
+            sandboxStreamLogic.actions.reset()
+        }
+        // Release the lazy mounts taken in afterMount (ref-counted unmount).
+        cache.sandboxStreamUnmount?.()
+        cache.sandboxStreamUnmount = undefined
+        cache.posthogAiContextUnmount?.()
+        cache.posthogAiContextUnmount = undefined
     }),
 
     subscriptions(({ actions, values }) => ({

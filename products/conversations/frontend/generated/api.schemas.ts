@@ -321,6 +321,11 @@ export interface PermissionResponseApi {
      * @maxLength 10000
      */
     customInput?: string
+    /**
+     * Trace id the client associated with the run, for PERMISSION_RESPONDED telemetry correlation.
+     * @maxLength 200
+     */
+    traceId?: string
 }
 
 /**

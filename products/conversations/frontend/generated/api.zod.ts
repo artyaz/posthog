@@ -76,6 +76,8 @@ export const conversationsPermissionCreateBodyOptionIdMax = 100
 
 export const conversationsPermissionCreateBodyCustomInputMax = 10000
 
+export const conversationsPermissionCreateBodyTraceIdMax = 200
+
 export const ConversationsPermissionCreateBody = /* @__PURE__ */ zod
     .object({
         requestId: zod
@@ -91,6 +93,11 @@ export const ConversationsPermissionCreateBody = /* @__PURE__ */ zod
             .max(conversationsPermissionCreateBodyCustomInputMax)
             .optional()
             .describe("Optional feedback text sent with a 'reject_with_feedback' decision."),
+        traceId: zod
+            .string()
+            .max(conversationsPermissionCreateBodyTraceIdMax)
+            .optional()
+            .describe('Trace id the client associated with the run, for PERMISSION_RESPONDED telemetry correlation.'),
     })
     .describe('Approval reply for a sandbox-runtime `permission_request` (02_CORE.md § 5.5).')
 
