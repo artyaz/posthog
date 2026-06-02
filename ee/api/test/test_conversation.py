@@ -1298,3 +1298,44 @@ class TestConversationSandboxRoute(APIBaseTest):
             )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         m_cancel.assert_called_once()
+
+    def test_prewarm_post_delegates_to_warm_handler(self):
+        conversation = self._sandbox_conversation()
+        sentinel = Response(status=status.HTTP_204_NO_CONTENT)
+        with patch("ee.api.conversation.handle_sandbox_prewarm", return_value=sentinel) as m_warm:
+            response = self.client.post(
+                f"/api/environments/{self.team.id}/conversations/{conversation.id}/prewarm/",
+            )
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        m_warm.assert_called_once()
+        passed_conversation = m_warm.call_args[0][1]
+        self.assertEqual(passed_conversation.id, conversation.id)
+
+    def test_prewarm_delete_delegates_to_release_handler(self):
+        conversation = self._sandbox_conversation()
+        sentinel = Response(status=status.HTTP_204_NO_CONTENT)
+        with patch("ee.api.conversation.handle_sandbox_prewarm_release", return_value=sentinel) as m_release:
+            response = self.client.delete(
+                f"/api/environments/{self.team.id}/conversations/{conversation.id}/prewarm/",
+            )
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        m_release.assert_called_once()
+
+    def test_prewarm_rejects_langgraph_conversation(self):
+        conversation = Conversation.objects.create(
+            user=self.user,
+            team=self.team,
+            title="A chat",
+            type=Conversation.Type.ASSISTANT,
+            agent_runtime=Conversation.AgentRuntime.LANGGRAPH,
+        )
+        with (
+            patch("ee.api.conversation.handle_sandbox_prewarm") as m_warm,
+            patch("ee.api.conversation.handle_sandbox_prewarm_release") as m_release,
+        ):
+            response = self.client.post(
+                f"/api/environments/{self.team.id}/conversations/{conversation.id}/prewarm/",
+            )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        m_warm.assert_not_called()
+        m_release.assert_not_called()

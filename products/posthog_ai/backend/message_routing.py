@@ -425,6 +425,162 @@ def handle_sandbox_cancel(conversation: "Conversation") -> Response:
     )
 
 
+def handle_sandbox_prewarm(request: Request, conversation: "Conversation") -> Response:
+    """Eagerly provision a sandbox Run while the user is typing (05_SANDBOX § 8.1).
+
+    Boots the sandbox + ACP session ahead of the first submit so first-token
+    latency drops from a cold boot to roughly model-invocation time. The warm
+    Run carries the standard systemPrompt but **no** ``pending_user_message`` and
+    **no** ``attached_context`` — it opens the session and idles waiting for a
+    ``user_message`` command. When the user submits, ``handle_sandbox_message``
+    finds the Run in-progress and routes via the in-process follow-up branch.
+
+    Idempotent: if the conversation already has a non-terminal current Run, this
+    is a no-op. Returns 204 either way (05_SANDBOX § 8.2).
+    """
+    team = conversation.team
+    user = cast(User, request.user)
+
+    # Already warmed (or actively running): a live Run is the desired end state, so
+    # do nothing. Submitting later follows the in-progress branch onto this Run.
+    if conversation.task_id is not None:
+        current_run = conversation.current_run
+        if current_run is not None and current_run.status in _IN_PROGRESS_STATUSES:
+            return Response(status=status.HTTP_204_NO_CONTENT)
+
+    system_prompt = async_to_sync(build_posthog_ai_system_prompt)(team, user)
+
+    if conversation.task_id is None:
+        _prewarm_first(conversation=conversation, team=team, user=user, system_prompt=system_prompt)
+    else:
+        _prewarm_rewarm(conversation=conversation, team=team, user=user, system_prompt=system_prompt)
+
+    return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+def _prewarm_first(
+    *,
+    conversation: "Conversation",
+    team: Team,
+    user: User,
+    system_prompt: str,
+) -> None:
+    """First warm — create the Task + Run, mirroring `_handle_first_message` but
+    without a `pending_user_message` or `attached_context` (05_SANDBOX § 8.1)."""
+    task = Task.create_and_run(
+        team=team,
+        title="",
+        description="",
+        origin_product=Task.OriginProduct.POSTHOG_AI,
+        user_id=user.pk,
+        repository=None,
+        create_pr=False,
+        mode="interactive",
+        initial_permission_mode="default",
+        # Defer the workflow so the initial run state can carry the PostHog AI keys.
+        start_workflow=False,
+    )
+
+    task_run = task.latest_run
+    if task_run is None:
+        raise exceptions.ValidationError("Failed to create sandbox prewarm run.")
+
+    run_state: dict[str, Any] = dict(task_run.state or {})
+    run_state.update(
+        {
+            "systemPrompt": system_prompt,
+            "initial_permission_mode": "default",
+            # No pending_user_message / attached_context: the session idles awaiting input.
+            "await_user_message": True,
+        }
+    )
+    task_run.state = run_state
+    task_run.save(update_fields=["state"])
+
+    with transaction.atomic():
+        conversation.task = task
+        conversation.save(update_fields=["task", "updated_at"])
+
+    execute_task_processing_workflow(
+        task_id=str(task.id),
+        run_id=str(task_run.id),
+        team_id=team.id,
+        user_id=user.pk,
+        create_pr=False,
+    )
+
+
+def _prewarm_rewarm(
+    *,
+    conversation: "Conversation",
+    team: Team,
+    user: User,
+    system_prompt: str,
+) -> None:
+    """Re-warm on an existing Task whose current Run is terminal (05_SANDBOX § 8.1).
+
+    Creates a fresh successor Run carrying the prior Run's snapshot so the warm
+    session reuses the filesystem, then starts its workflow."""
+    task = conversation.task
+    if task is None:
+        return
+
+    new_run: TaskRun | None = None
+    with lock_conversation_for_followup(str(conversation.id), team.id) as locked_conversation:
+        # Re-resolve under the lock: a concurrent prewarm / submit may have already
+        # created a live successor Run while we waited.
+        current_run = locked_conversation.current_run
+        if current_run is not None and current_run.status in _IN_PROGRESS_STATUSES:
+            return
+
+        extra_state: dict[str, Any] = {
+            "systemPrompt": system_prompt,
+            "initial_permission_mode": "default",
+            "await_user_message": True,
+        }
+        if current_run is not None:
+            extra_state["resume_from_run_id"] = str(current_run.id)
+            snapshot_external_id = (current_run.state or {}).get("snapshot_external_id")
+            if snapshot_external_id:
+                extra_state["snapshot_external_id"] = snapshot_external_id
+
+        new_run = task.create_run(mode="interactive", extra_state=extra_state)
+
+    if new_run is None:
+        return
+
+    execute_task_processing_workflow(
+        task_id=str(task.id),
+        run_id=str(new_run.id),
+        team_id=team.id,
+        user_id=user.pk,
+        create_pr=False,
+    )
+
+
+def handle_sandbox_prewarm_release(conversation: "Conversation") -> Response:
+    """Release / cancel an eager prewarm if the user abandons (05_SANDBOX § 8.1/8.2).
+
+    Cancels the conversation's current non-terminal Run via the in-process
+    products/tasks command path, letting it transition to terminal. The
+    conversation can prewarm again on the next typing session.
+
+    Idempotent: DELETE on a conversation with no warm Run is a no-op (returns 204).
+    """
+    if conversation.task_id is None:
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    run = conversation.current_run
+    if run is None or run.is_terminal:
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    if run.status not in _IN_PROGRESS_STATUSES:
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    send_cancel(run)
+    return Response(status=status.HTTP_204_NO_CONTENT)
+
+
 def _collect_seen_entity_refs(run: TaskRun) -> list[tuple[str, str | int]]:
     """Collect `(type, id)` pairs for entities already named in the conversation.
 

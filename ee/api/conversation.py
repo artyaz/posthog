@@ -52,7 +52,12 @@ from posthog.temporal.ai.research_agent import (
 )
 
 from products.posthog_ai.backend.context_wrapper import ALLOWED_TYPES as ALLOWED_ATTACHED_CONTEXT_TYPES
-from products.posthog_ai.backend.message_routing import handle_sandbox_cancel, handle_sandbox_message
+from products.posthog_ai.backend.message_routing import (
+    handle_sandbox_cancel,
+    handle_sandbox_message,
+    handle_sandbox_prewarm,
+    handle_sandbox_prewarm_release,
+)
 from products.tasks.backend.services.agent_command import send_permission_response
 
 from ee.billing.quota_limiting import QuotaLimitingCaches, QuotaResource, is_team_limited
@@ -671,6 +676,33 @@ class ConversationViewSet(
         if conversation.agent_runtime != Conversation.AgentRuntime.SANDBOX:
             raise exceptions.ValidationError("This conversation is not on the sandbox runtime.")
         return handle_sandbox_message(request, conversation)
+
+    @extend_schema(
+        request=None,
+        responses={
+            204: OpenApiResponse(description="Sandbox warmed (booting or ready), or already warm / released."),
+            400: OpenApiResponse(description="Conversation is not on the sandbox runtime."),
+        },
+        description=(
+            "Eagerly provision a sandbox for a sandbox-runtime conversation while the user is typing "
+            "(05_SANDBOX § 8). POST warms a Run in-process (no pending message); DELETE releases it if the "
+            "user abandons. Both idempotent and sandbox runtime only."
+        ),
+    )
+    @action(detail=True, methods=["POST", "DELETE"], url_path="prewarm")
+    def prewarm(self, request: Request, *args, **kwargs):
+        """Per-conversation eager sandbox warm (05_SANDBOX § 8.1/8.2).
+
+        Sandbox runtime only. POST delegates to the in-process products/tasks warm
+        path; DELETE cancels a warm Run. No HTTP-to-self, no provisioning reimplemented.
+        """
+        conversation = self.get_object()
+        if conversation.agent_runtime != Conversation.AgentRuntime.SANDBOX:
+            raise exceptions.ValidationError("This conversation is not on the sandbox runtime.")
+
+        if request.method == "DELETE":
+            return handle_sandbox_prewarm_release(conversation)
+        return handle_sandbox_prewarm(request, conversation)
 
     @action(detail=True, methods=["PATCH"])
     def cancel(self, request: Request, *args, **kwargs):
