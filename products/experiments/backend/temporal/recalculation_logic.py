@@ -193,7 +193,7 @@ def _update_recalculation_progress_sync(update: RecalculationProgressUpdate) -> 
 # ---------------------------------------------------------------------------
 
 
-def _find_metric_dict(experiment: Experiment, metric_uuid: str) -> dict | None:
+def find_metric_dict(experiment: Experiment, metric_uuid: str) -> dict | None:
     """Resolve a metric_uuid to its definition dict, across inline AND saved/shared metrics.
 
     Inline metrics are dicts in experiment.metrics / metrics_secondary. Saved metrics live on the M2M
@@ -337,7 +337,7 @@ def _calculate_experiment_metric_for_recalculation_sync(
         except Experiment.DoesNotExist:
             return _fail(recalculation_id, metric_uuid, "discovery", f"Experiment {experiment_id} not found or deleted")
 
-        metric_dict = _find_metric_dict(experiment, metric_uuid)
+        metric_dict = find_metric_dict(experiment, metric_uuid)
         if metric_dict is None:
             return _fail(
                 recalculation_id,
