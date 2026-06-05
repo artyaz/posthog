@@ -45,9 +45,7 @@ export function WebOverview(props: {
 
     const numSkeletons = props.query.conversionGoal ? 4 : 5
 
-    const usedWebAnalyticsPreAggregatedTables =
-        response && 'usedPreAggregatedTables' in response && response.usedPreAggregatedTables
-    const usedWebAnalyticsLazyPrecompute = response && 'usedLazyPrecompute' in response && response.usedLazyPrecompute
+    const preComputeStrategy = webOverviewQueryResponse?.preComputeStrategy
 
     const showWarning = hasReverseProxy === false && !!featureFlags[FEATURE_FLAGS.WEB_ANALYTICS_EMPTY_ONBOARDING]
 
@@ -74,8 +72,7 @@ export function WebOverview(props: {
             loading={responseLoading}
             numSkeletons={numSkeletons}
             samplingRate={samplingRate}
-            usedPreAggregatedTables={usedWebAnalyticsPreAggregatedTables}
-            usedLazyPrecompute={usedWebAnalyticsLazyPrecompute}
+            preComputeStrategy={preComputeStrategy}
             labelFromKey={labelFromKey}
         />
     )
