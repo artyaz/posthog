@@ -10917,6 +10917,9 @@
                     "format": "date-time",
                     "type": "string"
                 },
+                "preComputeStrategy": {
+                    "$ref": "#/definitions/WebAnalyticsPreComputeStrategy"
+                },
                 "query_metadata": {
                     "type": "object"
                 },
@@ -31595,6 +31598,9 @@
                             "$ref": "#/definitions/HogQLQueryModifiers",
                             "description": "Modifiers used when performing the query"
                         },
+                        "preComputeStrategy": {
+                            "$ref": "#/definitions/WebAnalyticsPreComputeStrategy"
+                        },
                         "query_status": {
                             "$ref": "#/definitions/QueryStatus",
                             "description": "Query status indicates whether next to the provided data, a query is still running."
@@ -43815,6 +43821,9 @@
                 "modifiers": {
                     "$ref": "#/definitions/HogQLQueryModifiers",
                     "description": "Modifiers used when performing the query"
+                },
+                "preComputeStrategy": {
+                    "$ref": "#/definitions/WebAnalyticsPreComputeStrategy"
                 },
                 "query_status": {
                     "$ref": "#/definitions/QueryStatus",
