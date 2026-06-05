@@ -285,6 +285,12 @@ impl PersonHogService for MockPersonHogService {
     ) -> Result<Response<DeleteGroupTypeMappingsBatchForTeamResponse>, Status> {
         Err(Status::unimplemented(""))
     }
+    async fn split_person(
+        &self,
+        _: Request<SplitPersonRequest>,
+    ) -> Result<Response<SplitPersonResponse>, Status> {
+        Err(Status::unimplemented(""))
+    }
 }
 
 // -- helpers ------------------------------------------------------------
