@@ -773,6 +773,11 @@ export const experimentLogic = kea<experimentLogicType>([
         removeMetric: (uuid: string, context: 'primary' | 'secondary') => ({ uuid, context }),
         updateMetricBreakdown: (uuid: string, breakdown: Breakdown) => ({ uuid, breakdown }),
         removeMetricBreakdown: (uuid: string, index: number, breakdown: Breakdown) => ({ uuid, index, breakdown }),
+        updateMetricAttribution: (
+            uuid: string,
+            attributionType: BreakdownAttributionType,
+            attributionValue?: number
+        ) => ({ uuid, attributionType, attributionValue }),
         // METRICS RESULTS
         clearMetricsResults: true,
         setPrimaryMetricsResults: (results: CachedNewExperimentQueryResponse[]) => ({ results }),
@@ -1087,6 +1092,30 @@ export const experimentLogic = kea<experimentLogicType>([
                     metrics[targetIndex] = {
                         ...metric,
                         breakdownFilter,
+                    } as ExperimentMetric
+
+                    return {
+                        ...state,
+                        [metricsKey]: metrics,
+                    }
+                },
+                updateMetricAttribution: (state, { uuid, attributionType, attributionValue }) => {
+                    // Attribution is funnel-only and configured on inline metrics from the results header.
+                    const metricsKey =
+                        (state?.metrics || ([] as ExperimentMetric[])).findIndex((m) => m.uuid === uuid) > -1
+                            ? 'metrics'
+                            : 'metrics_secondary'
+
+                    const metrics = [...(state?.[metricsKey] || [])]
+                    const targetIndex = metrics.findIndex((m) => m.uuid === uuid)
+                    if (targetIndex === -1) {
+                        return state
+                    }
+
+                    metrics[targetIndex] = {
+                        ...metrics[targetIndex],
+                        breakdownAttributionType: attributionType,
+                        breakdownAttributionValue: attributionValue,
                     } as ExperimentMetric
 
                     return {
@@ -2221,6 +2250,21 @@ export const experimentLogic = kea<experimentLogicType>([
             }
 
             actions.updateExperiment(updatePayload)
+
+            if (isPrimary) {
+                actions.loadPrimaryMetricsResults(true)
+            } else {
+                actions.loadSecondaryMetricsResults(true)
+            }
+        },
+        updateMetricAttribution: async ({ uuid }) => {
+            const isPrimary = values.experiment.metrics.some((m) => m.uuid === uuid)
+
+            actions.updateExperiment({
+                metrics: values.experiment.metrics,
+                metrics_secondary: values.experiment.metrics_secondary,
+                update_feature_flag_params: false,
+            })
 
             if (isPrimary) {
                 actions.loadPrimaryMetricsResults(true)

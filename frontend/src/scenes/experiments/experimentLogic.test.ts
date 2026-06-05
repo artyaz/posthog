@@ -9,9 +9,15 @@ import experimentJson from '~/mocks/fixtures/api/experiments/_experiment_launche
 import experimentMetricResultsErrorJson from '~/mocks/fixtures/api/experiments/_experiment_metric_results_error.json'
 import experimentMetricResultsSuccessJson from '~/mocks/fixtures/api/experiments/_experiment_metric_results_success.json'
 import { useMocks } from '~/mocks/jest'
-import { Breakdown, ExperimentMetric, ExperimentMetricType, NodeKind } from '~/queries/schema/schema-general'
+import {
+    Breakdown,
+    ExperimentFunnelMetric,
+    ExperimentMetric,
+    ExperimentMetricType,
+    NodeKind,
+} from '~/queries/schema/schema-general'
 import { initKeaTests } from '~/test/init'
-import { Experiment } from '~/types'
+import { BreakdownAttributionType, Experiment } from '~/types'
 
 import {
     ExperimentSavedMetric,
@@ -454,6 +460,27 @@ describe('experimentLogic', () => {
 
             const updatedMetric = logic.values.experiment.metrics[0] as ExperimentMetric
             expect(updatedMetric.breakdownFilter?.breakdowns).toEqual([breakdown])
+        })
+
+        it('should update funnel attribution on inline metric', () => {
+            const testExperiment: Experiment = {
+                ...experiment,
+                metrics: [
+                    {
+                        uuid: 'test-metric-uuid',
+                        metric_type: ExperimentMetricType.FUNNEL,
+                        series: [{ kind: NodeKind.EventsNode, event: '$pageview' }],
+                        breakdownFilter: { breakdowns: [{ property: '$browser', type: 'event' }] },
+                    },
+                ] as unknown as ExperimentMetric[],
+            }
+
+            logic.actions.setExperiment(testExperiment)
+            logic.actions.updateMetricAttribution('test-metric-uuid', BreakdownAttributionType.Step, 1)
+
+            const updatedMetric = logic.values.experiment.metrics[0] as ExperimentFunnelMetric
+            expect(updatedMetric.breakdownAttributionType).toEqual(BreakdownAttributionType.Step)
+            expect(updatedMetric.breakdownAttributionValue).toEqual(1)
         })
 
         it('should add breakdown to shared metric metadata', () => {
