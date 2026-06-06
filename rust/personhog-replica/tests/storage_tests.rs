@@ -2145,8 +2145,8 @@ async fn test_split_person_idempotent() {
 
     let msg = err.to_string();
     assert!(
-        msg.contains("NOT_FOUND"),
-        "Expected NOT_FOUND error, got: {msg}"
+        msg.contains("Not found"),
+        "Expected NotFound error, got: {msg}"
     );
 
     // The new person should still exist with the correct UUID
@@ -2181,8 +2181,8 @@ async fn test_split_person_not_found_unknown_distinct_id() {
 
     let msg = err.to_string();
     assert!(
-        msg.contains("NOT_FOUND"),
-        "Expected NOT_FOUND error, got: {msg}"
+        msg.contains("Not found"),
+        "Expected NotFound error, got: {msg}"
     );
 
     ctx.cleanup().await.ok();
@@ -2203,8 +2203,8 @@ async fn test_split_person_not_found_wrong_person() {
 
     let msg = err.to_string();
     assert!(
-        msg.contains("NOT_FOUND"),
-        "Expected NOT_FOUND error, got: {msg}"
+        msg.contains("Not found"),
+        "Expected NotFound error, got: {msg}"
     );
 
     ctx.cleanup().await.ok();
@@ -2226,8 +2226,8 @@ async fn test_split_person_not_found_nonexistent_person() {
 
     let msg = err.to_string();
     assert!(
-        msg.contains("not found"),
-        "Expected person not found error, got: {msg}"
+        msg.contains("Not found"),
+        "Expected NotFound error, got: {msg}"
     );
 
     ctx.cleanup().await.ok();
@@ -2259,8 +2259,8 @@ async fn test_split_person_cross_team_isolation() {
 
     let msg = err.to_string();
     assert!(
-        msg.contains("not found") || msg.contains("NOT_FOUND"),
-        "Expected not found error for wrong team, got: {msg}"
+        msg.contains("Not found"),
+        "Expected NotFound error, got: {msg}"
     );
 
     // Original should be untouched
@@ -2303,8 +2303,8 @@ async fn test_split_person_transaction_rollback_on_partial_failure() {
 
     let msg = err.to_string();
     assert!(
-        msg.contains("NOT_FOUND"),
-        "Expected NOT_FOUND error, got: {msg}"
+        msg.contains("Not found"),
+        "Expected NotFound error, got: {msg}"
     );
 
     // Valid distinct_id should NOT have been reassigned (no partial commit)
