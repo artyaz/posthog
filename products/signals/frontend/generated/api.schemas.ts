@@ -850,20 +850,17 @@ export interface EvidenceEntryApi {
 }
 
 /**
- * * `P0` - P0
- * `P1` - P1
- * `P2` - P2
- * `P3` - P3
- * `P4` - P4
+ * * `critical` - critical
+ * `warning` - warning
+ * `info` - info
  */
-export type AutonomyPriorityEnumApi = (typeof AutonomyPriorityEnumApi)[keyof typeof AutonomyPriorityEnumApi]
+export type EmitFindingRequestSeverityEnumApi =
+    (typeof EmitFindingRequestSeverityEnumApi)[keyof typeof EmitFindingRequestSeverityEnumApi]
 
-export const AutonomyPriorityEnumApi = {
-    P0: 'P0',
-    P1: 'P1',
-    P2: 'P2',
-    P3: 'P3',
-    P4: 'P4',
+export const EmitFindingRequestSeverityEnumApi = {
+    Critical: 'critical',
+    Warning: 'warning',
+    Info: 'info',
 } as const
 
 export interface TimeRangeApi {
@@ -906,12 +903,10 @@ export interface EmitFindingRequestApi {
     hypothesis?: string | null
     /** Optional severity tag — one of P0, P1, P2, P3, P4. Informational only.
 
-  * `P0` - P0
-  * `P1` - P1
-  * `P2` - P2
-  * `P3` - P3
-  * `P4` - P4 */
-    severity?: AutonomyPriorityEnumApi | null
+  * `critical` - critical
+  * `warning` - warning
+  * `info` - info */
+    severity?: EmitFindingRequestSeverityEnumApi | null
     /** Optional keys for downstream dedupe (e.g. `error_tracking_issue:<id>`). */
     dedupe_keys?: string[]
     /** Optional time window the finding refers to. */
@@ -1013,6 +1008,7 @@ export interface ForgetResponseApi {
  * `pganalyze` - pganalyze
  * `signals_scout` - Signals scout
  * `logs` - Logs
+ * `health_checks` - Health checks
  */
 export type SourceProductEnumApi = (typeof SourceProductEnumApi)[keyof typeof SourceProductEnumApi]
 
@@ -1027,6 +1023,7 @@ export const SourceProductEnumApi = {
     Pganalyze: 'pganalyze',
     SignalsScout: 'signals_scout',
     Logs: 'logs',
+    HealthChecks: 'health_checks',
 } as const
 
 /**
@@ -1039,6 +1036,7 @@ export const SourceProductEnumApi = {
  * `issue_spiking` - Issue spiking
  * `cross_source_issue` - Cross source issue
  * `alert_state_change` - Alert state change
+ * `health_issue` - Health issue
  */
 export type SignalSourceConfigSourceTypeEnumApi =
     (typeof SignalSourceConfigSourceTypeEnumApi)[keyof typeof SignalSourceConfigSourceTypeEnumApi]
@@ -1053,6 +1051,7 @@ export const SignalSourceConfigSourceTypeEnumApi = {
     IssueSpiking: 'issue_spiking',
     CrossSourceIssue: 'cross_source_issue',
     AlertStateChange: 'alert_state_change',
+    HealthIssue: 'health_issue',
 } as const
 
 export interface SignalSourceConfigApi {
@@ -1095,6 +1094,23 @@ export interface _UserApi {
     readonly last_name: string
     readonly email: string
 }
+
+/**
+ * * `P0` - P0
+ * `P1` - P1
+ * `P2` - P2
+ * `P3` - P3
+ * `P4` - P4
+ */
+export type AutonomyPriorityEnumApi = (typeof AutonomyPriorityEnumApi)[keyof typeof AutonomyPriorityEnumApi]
+
+export const AutonomyPriorityEnumApi = {
+    P0: 'P0',
+    P1: 'P1',
+    P2: 'P2',
+    P3: 'P3',
+    P4: 'P4',
+} as const
 
 export type BlankEnumApi = (typeof BlankEnumApi)[keyof typeof BlankEnumApi]
 

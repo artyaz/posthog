@@ -14379,6 +14379,20 @@ export namespace Schemas {
       entity_id?: string | null;
     }
 
+    /**
+     * * `critical` - critical
+    * `warning` - warning
+    * `info` - info
+     */
+    export type EmitFindingRequestSeverityEnum = typeof EmitFindingRequestSeverityEnum[keyof typeof EmitFindingRequestSeverityEnum];
+
+
+    export const EmitFindingRequestSeverityEnum = {
+      Critical: 'critical',
+      Warning: 'warning',
+      Info: 'info',
+    } as const;
+
     export interface TimeRange {
       /** ISO-8601 inclusive lower bound for the finding's window. */
       date_from: string;
@@ -14419,12 +14433,10 @@ export namespace Schemas {
       hypothesis?: string | null;
       /** Optional severity tag — one of P0, P1, P2, P3, P4. Informational only.
 
-      * `P0` - P0
-      * `P1` - P1
-      * `P2` - P2
-      * `P3` - P3
-      * `P4` - P4 */
-      severity?: AutonomyPriorityEnum | null;
+      * `critical` - critical
+      * `warning` - warning
+      * `info` - info */
+      severity?: EmitFindingRequestSeverityEnum | null;
       /** Optional keys for downstream dedupe (e.g. `error_tracking_issue:<id>`). */
       dedupe_keys?: string[];
       /** Optional time window the finding refers to. */
@@ -26032,6 +26044,7 @@ export namespace Schemas {
     * `pganalyze` - pganalyze
     * `signals_scout` - Signals scout
     * `logs` - Logs
+    * `health_checks` - Health checks
      */
     export type SourceProductEnum = typeof SourceProductEnum[keyof typeof SourceProductEnum];
 
@@ -26047,6 +26060,7 @@ export namespace Schemas {
       Pganalyze: 'pganalyze',
       SignalsScout: 'signals_scout',
       Logs: 'logs',
+      HealthChecks: 'health_checks',
     } as const;
 
     /**
@@ -26059,6 +26073,7 @@ export namespace Schemas {
     * `issue_spiking` - Issue spiking
     * `cross_source_issue` - Cross source issue
     * `alert_state_change` - Alert state change
+    * `health_issue` - Health issue
      */
     export type SignalSourceConfigSourceTypeEnum = typeof SignalSourceConfigSourceTypeEnum[keyof typeof SignalSourceConfigSourceTypeEnum];
 
@@ -26073,6 +26088,7 @@ export namespace Schemas {
       IssueSpiking: 'issue_spiking',
       CrossSourceIssue: 'cross_source_issue',
       AlertStateChange: 'alert_state_change',
+      HealthIssue: 'health_issue',
     } as const;
 
     export interface SignalSourceConfig {

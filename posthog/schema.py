@@ -2536,6 +2536,26 @@ class GoogleAdsTableKeywords(StrEnum):
     CAMPAIGN = "campaign"
 
 
+class Severity(StrEnum):
+    CRITICAL = "critical"
+    WARNING = "warning"
+    INFO = "info"
+
+
+class HealthCheckSignalExtra(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+    )
+    issue_id: str
+    kind: str
+    link: str = Field(..., description="Relative in-app path to the resource, e.g. '/web'.")
+    payload: dict[str, Any]
+    severity: Severity
+    summary: str
+    title: str
+    url: str = Field(..., description="Absolute URL ({project.url} + link).")
+
+
 class HeatmapGradientStop(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
@@ -4638,6 +4658,7 @@ class SignalSourceProduct(StrEnum):
     PGANALYZE = "pganalyze"
     SIGNALS_SCOUT = "signals_scout"
     LOGS = "logs"
+    HEALTH_CHECKS = "health_checks"
 
 
 class SignalSourceType(StrEnum):
@@ -4653,6 +4674,7 @@ class SignalSourceType(StrEnum):
     ENDPOINT_EXECUTION_FAILED = "endpoint_execution_failed"
     CROSS_SOURCE_ISSUE = "cross_source_issue"
     ALERT_STATE_CHANGE = "alert_state_change"
+    HEALTH_ISSUE = "health_issue"
 
 
 class SignalsScoutEvidenceEntry(BaseModel):
@@ -4670,7 +4692,7 @@ class SignalsScoutEvidenceEntry(BaseModel):
     summary: str = Field(..., description="One-line summary of the evidence the scout used.")
 
 
-class Severity(StrEnum):
+class Severity1(StrEnum):
     P0 = "P0"
     P1 = "P1"
     P2 = "P2"
@@ -4706,7 +4728,7 @@ class SignalsScoutSignalExtra(BaseModel):
         description=("Trace id from the LLM analytics span for the scout run, when available."),
     )
     scout_run_id: str
-    severity: Severity | None = None
+    severity: Severity1 | None = None
     skill_name: str
     skill_version: float
     task_run_id: str = Field(
@@ -7546,6 +7568,19 @@ class GroupPropertyFilter(BaseModel):
     value: list[str | float | bool] | str | float | bool | None = None
 
 
+class HealthCheckSignalInput(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+    )
+    description: str
+    extra: HealthCheckSignalExtra
+    remediation: SignalRemediation | None = None
+    source_id: str
+    source_product: Literal["health_checks"] = "health_checks"
+    source_type: Literal["health_issue"] = "health_issue"
+    weight: float
+
+
 class HeatmapSettings(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
@@ -9028,6 +9063,7 @@ class SignalInput(
         | PgAnalyzeIssueSignalInput
         | SignalsScoutSignalInput
         | LogsAlertStateChangeSignalInput
+        | HealthCheckSignalInput
     ]
 ):
     root: (
@@ -9043,6 +9079,7 @@ class SignalInput(
         | PgAnalyzeIssueSignalInput
         | SignalsScoutSignalInput
         | LogsAlertStateChangeSignalInput
+        | HealthCheckSignalInput
     )
 
 
