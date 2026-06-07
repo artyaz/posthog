@@ -25,6 +25,9 @@ SANDBOX_EVENT_INGEST_TOKEN_TTL = timedelta(seconds=SANDBOX_TTL_SECONDS) + SANDBO
 
 SANDBOX_JWT_STATE_KID_KEY = "sandbox_jwt_kid"
 
+STREAM_READ_AUDIENCE = "posthog:stream_read"
+STREAM_READ_TOKEN_TTL = timedelta(seconds=SANDBOX_TTL_SECONDS) + SANDBOX_EVENT_INGEST_TOKEN_TTL_BUFFER
+
 
 @dataclass(frozen=True)
 class SandboxEventIngestTokenPayload:
@@ -38,6 +41,13 @@ class _SandboxJwtKey:
     kid: str
     private_key_pem: str
     public_key_pem: str
+
+
+@dataclass(frozen=True)
+class StreamReadTokenPayload:
+    run_id: str
+    task_id: str
+    team_id: int
 
 
 def _normalize_pem_key(key: str) -> str:
@@ -111,7 +121,15 @@ def get_primary_sandbox_jwt_kid() -> str:
 
 
 def get_sandbox_jwt_public_key() -> str:
-    """Public key (PEM) baked into newly provisioned sandboxes for verifying connection tokens."""
+    """Public key (PEM) used to verify sandbox tokens, baked into newly provisioned sandboxes.
+
+    Prefers an explicitly configured public key so a verify-only service (the agent-proxy)
+    never needs the private key. Falls back to the primary signing key's public half for
+    Django, which mints tokens.
+    """
+    public_key_pem = settings.SANDBOX_JWT_PUBLIC_KEY
+    if public_key_pem:
+        return _normalize_pem_key(public_key_pem)
     return _primary_key().public_key_pem
 
 
@@ -194,3 +212,43 @@ def validate_sandbox_event_ingest_token(token: str) -> SandboxEventIngestTokenPa
         raise jwt.InvalidTokenError("Sandbox event ingest token has invalid claims")
 
     return SandboxEventIngestTokenPayload(run_id=run_id, task_id=task_id, team_id=team_id)
+
+
+def create_stream_read_token(task_run: TaskRun, ttl: timedelta = STREAM_READ_TOKEN_TTL) -> str:
+    """
+    Create a run-scoped JWT that authorizes reading a task run's live event stream.
+
+    Minted by Django (which authorizes the requesting user first) for the browser to
+    present to the standalone agent-proxy, which verifies it statelessly with the
+    public key. Carries no user identity and grants one capability: reading this
+    task run's stream.
+    """
+    now = datetime.now(tz=UTC)
+    payload = {
+        "run_id": str(task_run.id),
+        "task_id": str(task_run.task_id),
+        "team_id": task_run.team_id,
+        "iat": now,
+        "exp": now + ttl,
+        "aud": STREAM_READ_AUDIENCE,
+    }
+
+    return jwt.encode(payload, _primary_key().private_key_pem, algorithm="RS256")
+
+
+def validate_stream_read_token(token: str) -> StreamReadTokenPayload:
+    payload = jwt.decode(
+        token,
+        get_sandbox_jwt_public_key(),
+        algorithms=["RS256"],
+        audience=STREAM_READ_AUDIENCE,
+    )
+
+    run_id = payload.get("run_id")
+    task_id = payload.get("task_id")
+    team_id = payload.get("team_id")
+
+    if not isinstance(run_id, str) or not isinstance(task_id, str) or type(team_id) is not int:
+        raise jwt.InvalidTokenError("Stream read token has invalid claims")
+
+    return StreamReadTokenPayload(run_id=run_id, task_id=task_id, team_id=team_id)

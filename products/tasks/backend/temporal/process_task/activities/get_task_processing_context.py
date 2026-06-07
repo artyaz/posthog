@@ -163,6 +163,11 @@ def _is_sandbox_event_ingest_enabled(
         )
         return state_override
 
+    # Local dev disables the analytics SDK, so the rollout flag never evaluates. Pointing ingest at
+    # the local agent-proxy is the opt-in there; prod (DEBUG off) still gates on the flag below.
+    if settings.DEBUG and settings.TASKS_AGENT_PROXY_INGEST_URL:
+        return True
+
     try:
         enabled = bool(
             posthoganalytics.feature_enabled(

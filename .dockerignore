@@ -49,6 +49,12 @@
 !services/mcp/types.d.ts
 !services/mcp/worker-configuration.d.ts
 !services/mcp/public
+!services/agent-proxy
+!services/agent-proxy/package.json
+!services/agent-proxy/tsconfig.json
+!services/agent-proxy/scripts
+!services/agent-proxy/src
+!services/agent-proxy/types.d.ts
 !pnpm-lock.yaml
 !pnpm-workspace.yaml
 !pyproject.toml
@@ -80,6 +86,9 @@ services/mcp/node_modules
 services/mcp/dist
 services/mcp/.wrangler
 services/mcp/tests
+services/agent-proxy/node_modules
+services/agent-proxy/dist
+services/agent-proxy/tests
 ee/**/node_modules
 docs/**/node_modules
 **/__pycache__

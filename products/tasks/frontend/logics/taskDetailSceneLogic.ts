@@ -15,11 +15,12 @@ import {
 import { loaders } from 'kea-loaders'
 import { actionToUrl, router, urlToAction } from 'kea-router'
 
-import api from 'lib/api'
+import api, { type EventSourceMessage } from 'lib/api'
 import { isUUIDLike } from 'lib/utils'
 import { teamLogic } from 'scenes/teamLogic'
 import { urls } from 'scenes/urls'
 
+import { tasksRunsStreamTokenRetrieve } from '../generated/api'
 import { LogEntry, parseLogEvent } from '../lib/parse-logs'
 import { phDebugQueryParams, phDebugQuerySuffix } from '../lib/ph-debug'
 import { TaskRun, TaskRunStatus } from '../types'
@@ -28,13 +29,42 @@ import { TaskLogicProps, taskLogic } from './taskLogic'
 import { tasksLogic } from './tasksLogic'
 
 const LOG_POLL_INTERVAL_MS = 1000
+// Reconnect the live stream a bounded number of times with exponential backoff
+// before giving up. End-of-run is signalled in-band (the `stream-end` event), so
+// a dropped connection always means "reconnect", never "the run is done".
+const MAX_STREAM_RECONNECTS = 6
+const STREAM_RECONNECT_BASE_MS = 1000
+const STREAM_RECONNECT_MAX_MS = 15000
+const STREAM_END_EVENT = 'stream-end'
 
 export type TaskDetailSceneLogicProps = TaskLogicProps
 
-interface ParsedSseEvent {
-    data: string
-    eventType: string | null
-    id: string | null
+function streamResumeStorageKey(runId: string): string {
+    return `tasks:stream-resume:${runId}`
+}
+
+function readStreamResumeId(runId: string): string | null {
+    try {
+        return window.sessionStorage.getItem(streamResumeStorageKey(runId))
+    } catch {
+        return null
+    }
+}
+
+function writeStreamResumeId(runId: string, eventId: string): void {
+    try {
+        window.sessionStorage.setItem(streamResumeStorageKey(runId), eventId)
+    } catch {
+        // sessionStorage may be unavailable (private mode / quota) — resume from in-memory state only
+    }
+}
+
+function clearStreamResumeId(runId: string): void {
+    try {
+        window.sessionStorage.removeItem(streamResumeStorageKey(runId))
+    } catch {
+        // ignore
+    }
 }
 
 function buildToolMap(entries: LogEntry[]): Map<string, LogEntry> {
@@ -47,36 +77,29 @@ function buildToolMap(entries: LogEntry[]): Map<string, LogEntry> {
     return toolMap
 }
 
-function parseSseEventBlock(block: string): ParsedSseEvent | null {
-    let data = ''
-    let eventType: string | null = null
-    let id: string | null = null
+interface StreamTarget {
+    url: string
+    headers: Record<string, string>
+}
 
-    for (const line of block.split('\n')) {
-        if (!line) {
-            continue
+// Route the live stream through the standalone agent-proxy when the server resolves a base URL for it;
+// otherwise hit the Django endpoint directly. The proxy is purely additive: if the token call fails
+// (or the server returns no base URL), we fall back to the Django path, so streaming never breaks.
+async function resolveStreamTarget(taskId: string, runId: string): Promise<StreamTarget> {
+    const djangoPath = `/api/projects/@current/tasks/${taskId}/runs/${runId}/stream/`
+    try {
+        const { token, stream_base_url } = await tasksRunsStreamTokenRetrieve('@current', taskId, runId)
+        if (!stream_base_url) {
+            return { url: djangoPath, headers: {} }
         }
-        if (line.startsWith(':')) {
-            continue
+        // The proxy exposes a clean run-scoped path; the run-scoped token carries team and task.
+        return {
+            url: `${stream_base_url.replace(/\/+$/, '')}/v1/runs/${runId}/stream`,
+            headers: { Authorization: `Bearer ${token}` },
         }
-        if (line.startsWith('event:')) {
-            eventType = line.slice(6).trim() || null
-            continue
-        }
-        if (line.startsWith('id:')) {
-            id = line.slice(3).trim() || null
-            continue
-        }
-        if (line.startsWith('data:')) {
-            data = data ? `${data}\n${line.slice(5).trimStart()}` : line.slice(5).trimStart()
-        }
+    } catch {
+        return { url: djangoPath, headers: {} }
     }
-
-    if (!data && !eventType && !id) {
-        return null
-    }
-
-    return { data, eventType, id }
 }
 
 export const taskDetailSceneLogic = kea<taskDetailSceneLogicType>([
@@ -101,6 +124,7 @@ export const taskDetailSceneLogic = kea<taskDetailSceneLogicType>([
         startStreaming: true,
         stopStreaming: true,
         markStreamingFailed: true,
+        markStreamComplete: true,
         appendStreamEntries: (entries: LogEntry[]) => ({ entries }),
         updateStreamEntries: (entries: LogEntry[]) => ({ entries }),
         recordStreamProgress: (lastEventId: string | null, seenEventIds: string[]) => ({ lastEventId, seenEventIds }),
@@ -215,6 +239,14 @@ export const taskDetailSceneLogic = kea<taskDetailSceneLogicType>([
             {
                 setSelectedRunId: () => false,
                 markStreamingFailed: () => true,
+            },
+        ],
+        streamComplete: [
+            false,
+            {
+                setSelectedRunId: () => false,
+                startStreaming: () => false,
+                markStreamComplete: () => true,
             },
         ],
     })),
@@ -346,15 +378,29 @@ export const taskDetailSceneLogic = kea<taskDetailSceneLogicType>([
                 actions.updateRun(selectedRunData)
             }
             actions.loadTask()
-            if (values.shouldPoll) {
-                if (values.streamingFailed) {
-                    actions.startPolling()
-                } else if (!values.isStreaming) {
-                    actions.startStreaming()
-                }
-            } else {
-                actions.stopPolling()
+            if (values.streamComplete) {
+                // The stream signalled end-of-run in-band; stop reopening it, but keep polling
+                // until the refreshed run record catches up to a terminal status.
                 actions.stopStreaming()
+                const refreshedRun = selectedRunData ?? values.selectedRun
+                if (
+                    refreshedRun?.status === TaskRunStatus.QUEUED ||
+                    refreshedRun?.status === TaskRunStatus.IN_PROGRESS
+                ) {
+                    actions.startPolling()
+                } else {
+                    actions.stopPolling()
+                }
+                return
+            }
+            if (values.streamingFailed) {
+                // Reconnects were exhausted earlier; fall back to polling regardless of status.
+                actions.startPolling()
+            } else if (!values.isStreaming) {
+                // The durable stream is status-unaware: open it regardless of the run's current
+                // status and rely on the in-band stream-end sentinel to finish. Terminal runs
+                // replay their buffered events plus the sentinel; live runs stream as they go.
+                actions.startStreaming()
             }
         },
         loadTaskSuccess: ({ task }) => {
@@ -369,131 +415,132 @@ export const taskDetailSceneLogic = kea<taskDetailSceneLogicType>([
             }
         },
         startStreaming: () => {
-            // Stop any existing polling — streaming replaces it
+            // Streaming replaces polling
             actions.stopPolling()
+
+            const runId = values.selectedRunId
+            if (!runId) {
+                return
+            }
 
             cache.disposables.add(() => {
                 const abortController = new AbortController()
-                const runId = values.selectedRunId
-                if (!runId) {
-                    return () => {}
-                }
-
-                // TODO(no-at-current-in-api-urls): migrate to `currentProjectIdStrict`. Rule misses this site because the URL is bound to a const and passed to fetch via the variable.
-                const streamUrl = `/api/projects/@current/tasks/${props.taskId}/runs/${runId}/stream/`
                 const toolMap = buildToolMap(values.streamEntries)
                 let eventIndex = values.streamEntries.length
+                let reconnectCount = 0
+                let terminated = false
+                let disposed = false
 
-                const consume = async (): Promise<void> => {
+                const handleDataEvent = (message: EventSourceMessage): void => {
+                    if (message.id && values.seenStreamEventIds[message.id]) {
+                        return
+                    }
+                    let event: Record<string, unknown>
                     try {
-                        const response = await fetch(streamUrl, {
-                            signal: abortController.signal,
-                            headers: {
-                                Accept: 'text/event-stream',
-                                ...(values.lastStreamEventId ? { 'Last-Event-ID': values.lastStreamEventId } : {}),
-                            },
-                        })
-
-                        if (!response.ok || !response.body) {
-                            // Stream not available — fall back to polling
-                            actions.stopStreaming()
-                            actions.markStreamingFailed()
-                            actions.startPolling()
-                            return
-                        }
-
-                        const reader = response.body.getReader()
-                        const decoder = new TextDecoder()
-                        let buffer = ''
-
-                        while (true) {
-                            const { done, value } = await reader.read()
-                            if (done) {
-                                break
-                            }
-
-                            buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n')
-                            const blocks = buffer.split('\n\n')
-                            buffer = blocks.pop() || ''
-
-                            const batch: LogEntry[] = []
-                            const updatedEntriesById = new Map<string, LogEntry>()
-                            let lastProcessedEventId: string | null = null
-                            const newlySeenEventIds: string[] = []
-
-                            for (const block of blocks) {
-                                const parsedEvent = parseSseEventBlock(block)
-                                if (!parsedEvent || parsedEvent.eventType === 'keepalive' || !parsedEvent.data) {
-                                    continue
-                                }
-
-                                if (parsedEvent.id) {
-                                    if (
-                                        values.seenStreamEventIds[parsedEvent.id] ||
-                                        newlySeenEventIds.includes(parsedEvent.id)
-                                    ) {
-                                        continue
-                                    }
-                                    newlySeenEventIds.push(parsedEvent.id)
-                                    lastProcessedEventId = parsedEvent.id
-                                }
-
-                                try {
-                                    const event = JSON.parse(parsedEvent.data) as Record<string, unknown>
-                                    const entryId = parsedEvent.id
-                                        ? `stream-${parsedEvent.id}`
-                                        : `stream-${eventIndex++}`
-                                    const entry = parseLogEvent(event, entryId, toolMap, (updatedEntry) => {
-                                        updatedEntriesById.set(updatedEntry.id, updatedEntry)
-                                    })
-                                    if (entry) {
-                                        // Merge consecutive agent/thinking messages
-                                        const last = batch[batch.length - 1]
-                                        if (
-                                            last?.type === entry.type &&
-                                            (entry.type === 'agent' || entry.type === 'thinking')
-                                        ) {
-                                            last.message = (last.message || '') + (entry.message || '')
-                                        } else {
-                                            batch.push(entry)
-                                        }
-                                    }
-                                } catch {
-                                    // Skip invalid JSON
-                                }
-                            }
-
-                            if (newlySeenEventIds.length > 0) {
-                                actions.recordStreamProgress(lastProcessedEventId, newlySeenEventIds)
-                            }
-                            if (updatedEntriesById.size > 0) {
-                                actions.updateStreamEntries(Array.from(updatedEntriesById.values()))
-                            }
-                            if (batch.length > 0) {
-                                actions.appendStreamEntries(batch)
-                            }
-                        }
-
-                        // Clear streaming state before refreshing the run so in-progress
-                        // runs can reconnect cleanly after an EOF.
-                        actions.stopStreaming()
-                        // Stream ended normally — do a final poll to get the latest run status
-                        actions.loadSelectedRun()
-                    } catch (e) {
-                        if ((e as Error).name === 'AbortError') {
-                            return
-                        }
-                        // Stream failed — fall back to polling
-                        console.warn('SSE stream error, falling back to polling:', e)
-                        actions.stopStreaming()
-                        actions.markStreamingFailed()
-                        actions.startPolling()
+                        event = JSON.parse(message.data) as Record<string, unknown>
+                    } catch {
+                        return
+                    }
+                    const entryId = message.id ? `stream-${message.id}` : `stream-${eventIndex++}`
+                    const entry = parseLogEvent(event, entryId, toolMap, (updatedEntry) => {
+                        actions.updateStreamEntries([updatedEntry])
+                    })
+                    if (entry) {
+                        // appendStreamEntries merges consecutive agent/thinking messages at the reducer level
+                        actions.appendStreamEntries([entry])
+                    }
+                    if (message.id) {
+                        actions.recordStreamProgress(message.id, [message.id])
+                        writeStreamResumeId(runId, message.id)
                     }
                 }
 
-                consume()
+                const consume = async (): Promise<void> => {
+                    // Resolve the stream target (agent-proxy when enabled, else Django) and seed the
+                    // first connection from the persisted resume point; fetch-event-source manages
+                    // Last-Event-ID across its own reconnects after that.
+                    const target = await resolveStreamTarget(props.taskId, runId)
+                    const resumeId = values.lastStreamEventId ?? readStreamResumeId(runId)
+                    try {
+                        await api.stream(target.url, {
+                            method: 'GET',
+                            signal: abortController.signal,
+                            headers: { ...target.headers, ...(resumeId ? { 'Last-Event-ID': resumeId } : {}) },
+                            onOpen: () => {
+                                reconnectCount = 0
+                            },
+                            onMessage: (message) => {
+                                if (terminated) {
+                                    return
+                                }
+                                if (message.event === STREAM_END_EVENT) {
+                                    terminated = true
+                                    clearStreamResumeId(runId)
+                                    actions.markStreamComplete()
+                                    abortController.abort()
+                                    return
+                                }
+                                if (message.event === 'error') {
+                                    terminated = true
+                                    abortController.abort()
+                                    return
+                                }
+                                if (message.event === 'keepalive' || !message.data) {
+                                    return
+                                }
+                                handleDataEvent(message)
+                            },
+                            onError: (error) => {
+                                // fetch-event-source: returning a number reconnects after that
+                                // many ms; throwing stops. A 4xx (run gone / forbidden) is fatal.
+                                if (terminated || disposed) {
+                                    throw error
+                                }
+                                const status = (error as { status?: number } | undefined)?.status
+                                if (typeof status === 'number' && status >= 400 && status < 500) {
+                                    throw error
+                                }
+                                reconnectCount += 1
+                                if (reconnectCount > MAX_STREAM_RECONNECTS) {
+                                    throw error
+                                }
+                                return Math.min(
+                                    STREAM_RECONNECT_BASE_MS * 2 ** (reconnectCount - 1),
+                                    STREAM_RECONNECT_MAX_MS
+                                )
+                            },
+                            onClose: () => {
+                                // Server closed the body without an end-of-run sentinel (e.g. a
+                                // backend restart). Route through onError to reconnect; a genuine
+                                // completion already set `terminated`.
+                                if (terminated || disposed) {
+                                    return
+                                }
+                                throw new Error('stream closed before completion')
+                            },
+                        })
+                    } catch {
+                        // Aborted, fatal, or reconnects exhausted — reconciled below
+                    }
 
-                return () => abortController.abort()
+                    if (disposed) {
+                        return
+                    }
+                    actions.stopStreaming()
+                    if (!values.streamComplete) {
+                        // Gave up only after real reconnect attempts (not the old one-error
+                        // latch); fall back to polling. Resets when the run changes.
+                        actions.markStreamingFailed()
+                    }
+                    actions.loadSelectedRun()
+                }
+
+                void consume()
+
+                return () => {
+                    disposed = true
+                    abortController.abort()
+                }
             }, 'sseStream')
         },
         stopStreaming: () => {

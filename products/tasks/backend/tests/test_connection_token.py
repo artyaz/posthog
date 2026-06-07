@@ -1,10 +1,14 @@
 import uuid
+from datetime import timedelta
 from types import SimpleNamespace
 from typing import cast
+
+import pytest
 
 from django.test import SimpleTestCase, override_settings
 
 import jwt
+from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
@@ -16,11 +20,14 @@ from products.tasks.backend.services.connection_token import (
     _derive_public_key_pem,
     create_sandbox_connection_token,
     create_sandbox_event_ingest_token,
+    create_stream_read_token,
     get_primary_sandbox_jwt_kid,
     get_sandbox_jwt_public_key,
     reset_sandbox_jwt_key_cache,
     validate_sandbox_event_ingest_token,
+    validate_stream_read_token,
 )
+from products.tasks.backend.tests.test_api import TEST_RSA_PRIVATE_KEY
 
 
 def _generate_private_key_pem() -> str:
@@ -123,7 +130,9 @@ class TestSandboxJwtRotation(SimpleTestCase):
         with self.assertRaises(jwt.InvalidTokenError):
             validate_sandbox_event_ingest_token(token)
 
-    @override_settings(SANDBOX_JWT_PRIVATE_KEY=KEY_A, SANDBOX_JWT_PRIVATE_KEY_SECONDARY=KEY_A)
+    @override_settings(
+        SANDBOX_JWT_PRIVATE_KEY=KEY_A, SANDBOX_JWT_PRIVATE_KEY_SECONDARY=KEY_A, SANDBOX_JWT_PUBLIC_KEY=None
+    )
     def test_duplicate_primary_and_secondary_collapse_to_one_key(self) -> None:
         reset_sandbox_jwt_key_cache()
         token = create_sandbox_event_ingest_token(_fake_run({SANDBOX_JWT_STATE_KID_KEY: KID_A}))
@@ -131,3 +140,75 @@ class TestSandboxJwtRotation(SimpleTestCase):
         self.assertEqual(payload.team_id, 1)
         self.assertEqual(get_primary_sandbox_jwt_kid(), KID_A)
         self.assertEqual(get_sandbox_jwt_public_key(), _derive_public_key_pem(KEY_A))
+
+
+_RUN_ID = "11111111-1111-1111-1111-111111111111"
+_TASK_ID = "22222222-2222-2222-2222-222222222222"
+
+
+def _fake_task_run() -> TaskRun:
+    return cast(TaskRun, SimpleNamespace(id=_RUN_ID, task_id=_TASK_ID, team_id=7))
+
+
+@override_settings(SANDBOX_JWT_PRIVATE_KEY=TEST_RSA_PRIVATE_KEY, SANDBOX_JWT_PUBLIC_KEY=None)
+def test_stream_read_token_roundtrip():
+    reset_sandbox_jwt_key_cache()
+    token = create_stream_read_token(_fake_task_run())
+
+    claims = validate_stream_read_token(token)
+
+    assert claims.run_id == _RUN_ID
+    assert claims.task_id == _TASK_ID
+    assert claims.team_id == 7
+
+
+@override_settings(SANDBOX_JWT_PRIVATE_KEY=TEST_RSA_PRIVATE_KEY, SANDBOX_JWT_PUBLIC_KEY=None)
+def test_stream_read_token_rejects_expired():
+    reset_sandbox_jwt_key_cache()
+    token = create_stream_read_token(_fake_task_run(), ttl=timedelta(seconds=-1))
+
+    with pytest.raises(jwt.ExpiredSignatureError):
+        validate_stream_read_token(token)
+
+
+@override_settings(SANDBOX_JWT_PRIVATE_KEY=TEST_RSA_PRIVATE_KEY)
+def test_stream_read_token_is_not_accepted_for_event_ingest():
+    reset_sandbox_jwt_key_cache()
+    token = create_stream_read_token(_fake_task_run())
+
+    with pytest.raises(jwt.InvalidAudienceError):
+        validate_sandbox_event_ingest_token(token)
+
+
+@override_settings(SANDBOX_JWT_PRIVATE_KEY=TEST_RSA_PRIVATE_KEY, SANDBOX_JWT_PUBLIC_KEY=None)
+def test_event_ingest_token_is_not_accepted_for_stream_read():
+    reset_sandbox_jwt_key_cache()
+    token = create_sandbox_event_ingest_token(_fake_task_run())
+
+    with pytest.raises(jwt.InvalidAudienceError):
+        validate_stream_read_token(token)
+
+
+def _public_key_for(private_key_pem: str) -> str:
+    private_key = serialization.load_pem_private_key(private_key_pem.encode(), password=None, backend=default_backend())
+    return (
+        private_key.public_key()
+        .public_bytes(encoding=serialization.Encoding.PEM, format=serialization.PublicFormat.SubjectPublicKeyInfo)
+        .decode()
+    )
+
+
+def test_stream_read_token_validates_with_public_key_only():
+    # Django mints with the private key; a verify-only service (agent-proxy) validates with ONLY
+    # the public key configured and no private key present.
+    with override_settings(SANDBOX_JWT_PRIVATE_KEY=TEST_RSA_PRIVATE_KEY, SANDBOX_JWT_PUBLIC_KEY=None):
+        reset_sandbox_jwt_key_cache()
+        token = create_stream_read_token(_fake_task_run())
+
+    with override_settings(SANDBOX_JWT_PRIVATE_KEY=None, SANDBOX_JWT_PUBLIC_KEY=_public_key_for(TEST_RSA_PRIVATE_KEY)):
+        reset_sandbox_jwt_key_cache()
+        claims = validate_stream_read_token(token)
+
+    assert claims.run_id == _RUN_ID
+    assert claims.team_id == 7
+    reset_sandbox_jwt_key_cache()

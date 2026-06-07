@@ -11,6 +11,7 @@ from asgiref.sync import sync_to_async
 from jwt import PyJWTError
 
 from products.tasks.backend.models import TaskRun
+from products.tasks.backend.push_dispatcher import notify_task_run_awaiting_input
 from products.tasks.backend.services.connection_token import (
     SandboxEventIngestTokenPayload,
     validate_sandbox_event_ingest_token,
@@ -272,6 +273,7 @@ def _parse_ingest_line(line: str) -> EventIngestEventLine | EventIngestCompleteL
 async def _heartbeat_workflow_if_needed(redis_stream: TaskRunRedisStream, run_id: str, event: dict) -> None:
     if is_turn_complete(event):
         await redis_stream.set_agent_active(False)
+        await _dispatch_awaiting_input_if_interactive(run_id)
         return
 
     if _is_session_update(event):
@@ -297,6 +299,24 @@ def _heartbeat_workflow(run_id: str, agent_active: bool) -> None:
         return
 
     task_run.heartbeat_workflow(agent_active=agent_active)
+
+
+async def _dispatch_awaiting_input_if_interactive(run_id: str) -> None:
+    """Notify when an interactive run finishes a turn and idles for input."""
+    await sync_to_async(_dispatch_awaiting_input_if_interactive_sync, thread_sensitive=True)(run_id)
+
+
+def _dispatch_awaiting_input_if_interactive_sync(run_id: str) -> None:
+    try:
+        task_run = TaskRun.objects.select_related("task").get(id=run_id)
+    except TaskRun.DoesNotExist:
+        logger.warning("task_run_event_ingest_awaiting_input_run_missing", run_id=run_id)
+        return
+
+    if task_run.mode != "interactive":
+        return
+
+    notify_task_run_awaiting_input(task_run)
 
 
 def _is_session_update(event: dict) -> bool:

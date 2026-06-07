@@ -199,6 +199,33 @@ class TestTaskRunEventIngest(TransactionTestCase):
         self.assertEqual(self._read_notification_methods(), ["session/update"])
 
     @override_settings(SANDBOX_JWT_PRIVATE_KEY=TEST_RSA_PRIVATE_KEY)
+    def test_turn_complete_ingest_notifies_interactive_run_awaiting_input(self) -> None:
+        self.task_run.state = {"mode": "interactive"}
+        self.task_run.save(update_fields=["state"])
+        token = self._create_token()
+
+        with patch(
+            "products.tasks.backend.stream.event_ingest.notify_task_run_awaiting_input"
+        ) as notify_awaiting_input:
+            status, body = self._call_ingest(
+                token,
+                [
+                    {
+                        "seq": 1,
+                        "event": {
+                            "type": "notification",
+                            "notification": {"method": "_posthog/turn_complete"},
+                        },
+                    }
+                ],
+            )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(body["accepted"], 1)
+        notify_awaiting_input.assert_called_once()
+        self.assertEqual(notify_awaiting_input.call_args.args[0].id, self.task_run.id)
+
+    @override_settings(SANDBOX_JWT_PRIVATE_KEY=TEST_RSA_PRIVATE_KEY)
     def test_workflow_heartbeat_does_not_block_event_loop(self) -> None:
         token = self._create_token()
         heartbeat_entered = threading.Event()

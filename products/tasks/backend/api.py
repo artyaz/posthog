@@ -1,5 +1,6 @@
 import os
 import re
+import hmac
 import json
 import uuid
 import asyncio
@@ -22,6 +23,7 @@ import jsonschema
 import posthoganalytics
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, extend_schema
+from jwt import PyJWTError
 from rest_framework import status, viewsets
 from rest_framework.authentication import SessionAuthentication
 from rest_framework.decorators import action
@@ -54,6 +56,7 @@ from .automation_service import (
     sync_automation_schedule,
     update_automation_run_result,
 )
+from .constants import STREAM_VIA_PROXY_FEATURE_FLAG
 from .metrics import (
     StreamConnectionOutcome,
     observe_stream_connection_closed,
@@ -72,9 +75,12 @@ from .models import (
     TaskPresence,
     TaskRun,
 )
+from .push_dispatcher import notify_task_run_awaiting_input
 from .redis import get_tasks_cache, run_uses_dedicated_stream
 from .repository_readiness import compute_repository_readiness
 from .serializers import (
+    AgentProxyCallbackRequestSerializer,
+    AgentProxyCallbackResponseSerializer,
     CodeInviteRedeemRequestSerializer,
     ConnectionTokenResponseSerializer,
     RepositoryReadinessQuerySerializer,
@@ -83,6 +89,7 @@ from .serializers import (
     SandboxEnvironmentSerializer,
     SlackThreadContextQuerySerializer,
     SlackThreadContextResponseSerializer,
+    StreamReadTokenResponseSerializer,
     TaskAutomationSerializer,
     TaskListQuerySerializer,
     TaskPresenceBeaconRequestSerializer,
@@ -120,7 +127,11 @@ from .serializers import (
     get_task_run_artifact_max_size_bytes,
 )
 from .services.code_usage_gate import cloud_usage_limit_response
-from .services.connection_token import create_sandbox_connection_token
+from .services.connection_token import (
+    create_sandbox_connection_token,
+    create_stream_read_token,
+    validate_sandbox_event_ingest_token,
+)
 from .services.staged_artifacts import (
     RUN_ARTIFACT_TTL_DAYS,
     STAGED_ARTIFACT_TTL_DAYS,
@@ -166,6 +177,7 @@ logger = logging.getLogger(__name__)
 TASK_RUN_STREAM_KEEPALIVE_INTERVAL_SECONDS = 20.0
 TASK_RUN_STREAM_KEEPALIVE_EVENT_NAME = "keepalive"
 TASK_RUN_STREAM_KEEPALIVE_PAYLOAD = {"type": "keepalive"}
+TASK_RUN_STREAM_END_EVENT_NAME = "stream-end"
 TASK_RUN_ARTIFACT_UPLOAD_EXPIRATION_SECONDS = 60 * 60
 
 
@@ -1638,8 +1650,6 @@ class TaskRunViewSet(TeamAndOrgViewSetMixin, viewsets.ModelViewSet):
             client = sync_connect()
             handle = client.get_workflow_handle(task_run.workflow_id)
 
-            import asyncio
-
             asyncio.run(handle.signal(ProcessTaskWorkflow.complete_task, args=[status, error_message]))
             logger.info(f"Signaled workflow completion for task run {task_run.id} with status {status}")
         except Exception as e:
@@ -1656,7 +1666,7 @@ class TaskRunViewSet(TeamAndOrgViewSetMixin, viewsets.ModelViewSet):
         # Allowlist read-only actions only — connection_token is a GET but mints a write-capable token.
         is_internal_debug_read = (
             _is_internal_debug_team(self.team_id)
-            and self.action in ("list", "retrieve", "logs", "session_logs", "stream")
+            and self.action in ("list", "retrieve", "logs", "session_logs", "stream", "stream_token")
             and self.request.query_params.get("ph_debug") == "true"
         )
         if not is_internal_debug_read:
@@ -2300,6 +2310,61 @@ class TaskRunViewSet(TeamAndOrgViewSetMixin, viewsets.ModelViewSet):
         return Response(ConnectionTokenResponseSerializer({"token": token}).data)
 
     @validated_request(
+        responses={
+            200: OpenApiResponse(
+                response=StreamReadTokenResponseSerializer,
+                description="Run-scoped token for reading the live event stream via the agent-proxy",
+            ),
+            404: OpenApiResponse(description="Task run not found"),
+        },
+        summary="Get task run stream read token",
+        description="Generate a run-scoped JWT that authorizes reading this task run's live event stream via the agent-proxy.",
+    )
+    @action(
+        detail=True,
+        methods=["get"],
+        url_path="stream_token",
+        required_scopes=["task:read"],
+    )
+    def stream_token(self, request, pk=None, **kwargs):
+        task_run = cast(TaskRun, self.get_object())
+        token = create_stream_read_token(task_run=task_run)
+        return Response(
+            StreamReadTokenResponseSerializer(
+                {"token": token, "stream_base_url": self._resolve_stream_base_url(request)}
+            ).data
+        )
+
+    def _resolve_stream_base_url(self, request) -> str | None:
+        """Proxy base URL for the read leg, or None to read from Django directly.
+
+        Returns the configured agent-proxy URL only when it is set for this environment AND the
+        read-via-proxy flag is enabled for the user, so rollout stays gradual and reversible. The
+        server owns this decision; clients just connect to whatever URL comes back.
+        """
+        proxy_url = settings.TASKS_AGENT_PROXY_PUBLIC_URL
+        if not proxy_url:
+            return None
+        # Local dev disables the analytics SDK, so the rollout flag never evaluates; the URL setting
+        # is the opt-in there. Prod (DEBUG off) still gates on the flag below.
+        if settings.DEBUG:
+            return proxy_url
+        try:
+            enabled = bool(
+                posthoganalytics.feature_enabled(
+                    STREAM_VIA_PROXY_FEATURE_FLAG,
+                    distinct_id=request.user.distinct_id,
+                    groups={"organization": str(self.team.organization_id)},
+                    group_properties={"organization": {"id": str(self.team.organization_id)}},
+                    only_evaluate_locally=False,
+                    send_feature_flag_events=False,
+                )
+            )
+        except Exception:
+            return None
+        return proxy_url if enabled else None
+
+    @validated_request(
         request_serializer=TaskRunCommandRequestSerializer,
         responses={
             200: OpenApiResponse(
@@ -2825,6 +2890,10 @@ class TaskRunViewSet(TeamAndOrgViewSetMixin, viewsets.ModelViewSet):
                         event_id, event = stream_item
                         yield format_sse_event(event, event_id=event_id)
                     outcome = "completed"
+                    # read_stream_entries only returns on the completion sentinel; emit an
+                    # explicit terminal event so the client stops reconnecting without
+                    # consulting run status (a dropped connection never reaches here).
+                    yield format_sse_event({"status": "complete"}, event_name=TASK_RUN_STREAM_END_EVENT_NAME)
                 except TaskRunStreamError as e:
                     outcome = "stream_error"
                     logger.error("TaskRunRedisStream error for stream %s: %s", stream_key, e, exc_info=True)
@@ -2986,3 +3055,113 @@ class SandboxEnvironmentViewSet(TeamAndOrgViewSetMixin, viewsets.ModelViewSet):
         context = super().get_serializer_context()
         context["team"] = self.team
         return context
+
+
+# ---------------------------------------------------------------------------
+# Internal agent-proxy callback (not a DRF viewset action — no team scoping,
+# auth is the sandbox event ingest JWT forwarded by the Node service).
+# Registered at: internal/tasks/runs/<run_id>/agent-proxy-callback/
+# ---------------------------------------------------------------------------
+
+
+@extend_schema(
+    tags=["task-runs"],
+    request=AgentProxyCallbackRequestSerializer,
+    responses={
+        200: OpenApiResponse(
+            response=AgentProxyCallbackResponseSerializer,
+            description="Side effect dispatched or skipped",
+        ),
+        400: OpenApiResponse(response=TaskRunErrorResponseSerializer, description="Invalid request body"),
+        401: OpenApiResponse(response=TaskRunErrorResponseSerializer, description="Missing or invalid JWT"),
+        403: OpenApiResponse(response=TaskRunErrorResponseSerializer, description="JWT claims do not match URL"),
+    },
+    summary="Agent-proxy side-effect callback",
+    description=(
+        "Internal endpoint called by the standalone Node agent-proxy after accepting an ingest event "
+        "that requires a Django-side side effect. Dispatches a Temporal heartbeat signal or an "
+        "awaiting-input mobile push notification depending on `kind`. "
+        "Authenticated with the forwarded sandbox event ingest JWT — no session or API key required. "
+        "Best-effort: always returns 200 when auth passes; side-effect failures are logged, not surfaced."
+    ),
+)
+def agent_proxy_callback(request, run_id: str) -> JsonResponse:
+    """Handle side-effect callbacks from the Node agent-proxy service.
+
+    Auth: sandbox event ingest JWT forwarded from the Node service as a Bearer token.
+    The JWT already carries run_id, task_id, team_id — body fields are validated
+    against the JWT claims to prevent cross-run confusion.
+    """
+    if request.method != "POST":
+        return JsonResponse({"error": "Method not allowed"}, status=405)
+
+    # Extract and validate the Bearer token
+    authorization = request.headers.get("Authorization", "")
+    if not authorization.startswith("Bearer "):
+        return JsonResponse({"error": "Missing authorization bearer token"}, status=401)
+    token = authorization[len("Bearer ") :].strip()
+    if not token:
+        return JsonResponse({"error": "Missing authorization bearer token"}, status=401)
+
+    try:
+        claims = validate_sandbox_event_ingest_token(token)
+    except PyJWTError as exc:
+        return JsonResponse({"error": "Invalid event ingest token", "code": exc.__class__.__name__}, status=401)
+
+    # JWT run_id must match URL parameter
+    if claims.run_id != run_id:
+        return JsonResponse({"error": "Token does not match task run"}, status=403)
+
+    # Service-to-service guard: the event-ingest JWT is also held by the sandbox, so the JWT alone
+    # does not prove the caller is the agent-proxy. When a shared secret is configured, require it so
+    # a sandbox cannot drive this callback directly (bypassing the proxy's Redis sequencing/throttle).
+    expected_secret = settings.AGENT_PROXY_CALLBACK_SECRET
+    if expected_secret:
+        provided_secret = request.headers.get("X-Agent-Proxy-Secret", "")
+        if not hmac.compare_digest(provided_secret, expected_secret):
+            return JsonResponse({"error": "Invalid agent-proxy callback secret"}, status=403)
+
+    # Validate and parse the request body
+    try:
+        body = json.loads(request.body)
+    except (json.JSONDecodeError, ValueError):
+        return JsonResponse({"error": "Invalid JSON body"}, status=400)
+
+    serializer = AgentProxyCallbackRequestSerializer(data=body)
+    if not serializer.is_valid():
+        return JsonResponse({"error": "Invalid request body", "detail": serializer.errors}, status=400)
+
+    data = serializer.validated_data
+    kind: str = data["kind"]
+    task_id: str = data["task_id"]
+    team_id: int = data["team_id"]
+    agent_active: bool = data["agent_active"]
+
+    # Body claims must match JWT claims to prevent cross-run confusion
+    if task_id != claims.task_id or team_id != claims.team_id:
+        return JsonResponse({"error": "Token claims do not match request body"}, status=403)
+
+    dispatched = False
+
+    if kind == "heartbeat" and agent_active:
+        try:
+            task_run = TaskRun.objects.get(id=run_id, task_id=task_id, team_id=team_id)
+            task_run.heartbeat_workflow(agent_active=True)
+            dispatched = True
+        except TaskRun.DoesNotExist:
+            logger.warning("agent_proxy_callback.run_not_found", extra={"run_id": run_id})
+        except Exception:
+            logger.exception("agent_proxy_callback.heartbeat_failed", extra={"run_id": run_id})
+
+    elif kind == "awaiting_input":
+        try:
+            task_run = TaskRun.objects.select_related("task").get(id=run_id, task_id=task_id, team_id=team_id)
+            if task_run.mode == "interactive":
+                notify_task_run_awaiting_input(task_run)
+                dispatched = True
+        except TaskRun.DoesNotExist:
+            logger.warning("agent_proxy_callback.run_not_found", extra={"run_id": run_id})
+        except Exception:
+            logger.exception("agent_proxy_callback.awaiting_input_failed", extra={"run_id": run_id})
+
+    return JsonResponse(AgentProxyCallbackResponseSerializer({"dispatched": dispatched}).data)

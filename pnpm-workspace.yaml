@@ -16,6 +16,7 @@ packages:
     - nodejs/src/scripts
     - products/*
     - docs/onboarding
+    - services/agent-proxy
     - services/oauth-proxy
     - services/mcp
     - services/stripe-app
