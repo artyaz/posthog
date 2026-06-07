@@ -150,7 +150,6 @@ export function RadialChart<Meta = unknown>({
         hoverIndex,
         hoverPosition: null,
         theme,
-        dragRect: null,
         drawStatic,
         drawHover,
         hoverAnimationMs,
@@ -217,7 +216,11 @@ export function RadialChart<Meta = unknown>({
                             <div style={OVERLAY_STYLE}>
                                 {children}
                                 {tooltipCtx && showTooltip && (
-                                    <Tooltip context={tooltipCtx} renderTooltip={renderTooltip} placement="cursor" />
+                                    <Tooltip
+                                        context={tooltipCtx}
+                                        renderTooltip={renderTooltip}
+                                        placement="cursor"
+                                    />
                                 )}
                             </div>
                         )}
