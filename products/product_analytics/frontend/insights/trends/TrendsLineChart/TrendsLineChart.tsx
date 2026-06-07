@@ -1,4 +1,4 @@
-import { useValues } from 'kea'
+import { useActions, useValues } from 'kea'
 import { useCallback, useMemo } from 'react'
 
 import { DEFAULT_Y_AXIS_ID, TimeSeriesLineChart } from '@posthog/quill-charts'
@@ -16,6 +16,7 @@ import { formatAggregationAxisValue } from 'scenes/insights/aggregationAxisForma
 import { InsightEmptyState } from 'scenes/insights/EmptyStates'
 import { insightLogic } from 'scenes/insights/insightLogic'
 import type { SeriesDatum } from 'scenes/insights/InsightTooltip/insightTooltipUtils'
+import { insightVizDataLogic } from 'scenes/insights/insightVizDataLogic'
 import { teamLogic } from 'scenes/teamLogic'
 import { openPersonsModal } from 'scenes/trends/persons-modal/PersonsModal'
 import { trendsDataLogic } from 'scenes/trends/trendsDataLogic'
@@ -40,6 +41,7 @@ interface TrendsLineChartProps {
 }
 
 const TOOLTIP_CONFIG: TooltipConfig = { pinnable: true, placement: 'top' }
+const EMPTY_STRINGS: string[] = []
 
 const handleChartError = makeChartErrorHandler('trends-line-chart')
 
@@ -78,11 +80,31 @@ export function TrendsLineChart({ context, inSharedMode = false }: TrendsLineCha
     } = useValues(trendsDataLogic(insightProps))
     const { timezone, weekStartDay, baseCurrency } = useValues(teamLogic)
     const { aggregationLabel } = useValues(groupsModel)
+    const { updateDateRange } = useActions(insightVizDataLogic(insightProps))
 
     const isPercentStackView = !!showPercentStackView && !!supportsPercentStackView
     const resolvedGroupTypeLabel = context?.groupTypeLabel ?? resolveGroupTypeLabel(labelGroupType, aggregationLabel)
 
-    const labels = currentPeriodResult?.labels ?? []
+    const labels = currentPeriodResult?.labels ?? EMPTY_STRINGS
+    const days = currentPeriodResult?.days ?? EMPTY_STRINGS
+    const contextOnDateRangeZoom = context?.onDateRangeZoom
+    const onDateRangeZoom = useMemo(() => {
+        if (days.length === 0) {
+            return undefined
+        }
+        return ({ startIndex, endIndex }: { startIndex: number; endIndex: number }): void => {
+            const dateFrom = days[startIndex]
+            const dateTo = days[endIndex]
+            if (!dateFrom || !dateTo) {
+                return
+            }
+            if (contextOnDateRangeZoom) {
+                contextOnDateRangeZoom(dateFrom, dateTo)
+            } else {
+                updateDateRange({ date_from: dateFrom, date_to: dateTo }, true)
+            }
+        }
+    }, [contextOnDateRangeZoom, days, updateDateRange])
 
     const hasData =
         indexedResults &&
@@ -279,6 +301,7 @@ export function TrendsLineChart({ context, inSharedMode = false }: TrendsLineCha
             config={chartConfig}
             tooltip={renderTooltip}
             onPointClick={canHandleClick ? onPointClick : undefined}
+            onDateRangeZoom={onDateRangeZoom}
             className="LineGraph"
             dataAttr="trend-line-graph"
             onError={handleChartError}

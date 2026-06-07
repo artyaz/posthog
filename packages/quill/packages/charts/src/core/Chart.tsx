@@ -5,7 +5,7 @@ import { AxisTitles } from '../overlays/AxisTitles'
 import { DefaultTooltip } from '../overlays/DefaultTooltip'
 import { Tooltip } from '../overlays/Tooltip'
 import { normalizeAxisLabel } from '../utils/axis-labels'
-import { composeDrawHoverWithCrosshair } from './canvas-renderer'
+import { composeDrawHoverWithCrosshair, composeDrawHoverWithSelection } from './canvas-renderer'
 import { ChartHoverContext, ChartLayoutContext } from './chart-context'
 import type { ChartHoverContextValue, ChartLayoutContextValue } from './chart-context'
 import { useChartCanvas } from './hooks/useChartCanvas'
@@ -21,6 +21,7 @@ import type {
     ChartScales,
     ChartTheme,
     CreateScalesFn,
+    DateRangeZoomData,
     DrawHoverResult,
     PointClickData,
     ResolvedSeries,
@@ -47,6 +48,17 @@ const WRAPPER_STYLE_BASE: React.CSSProperties = {
 }
 const WRAPPER_STYLE_DEFAULT: React.CSSProperties = { ...WRAPPER_STYLE_BASE, cursor: 'default' }
 const WRAPPER_STYLE_POINTER: React.CSSProperties = { ...WRAPPER_STYLE_BASE, cursor: 'pointer' }
+const WRAPPER_STYLE_CROSSHAIR: React.CSSProperties = { ...WRAPPER_STYLE_BASE, cursor: 'crosshair' }
+
+function pickWrapperStyle(hasDragToZoom: boolean, hasPointClick: boolean, isOverPoint: boolean): React.CSSProperties {
+    if (hasPointClick && isOverPoint) {
+        return WRAPPER_STYLE_POINTER
+    }
+    if (hasDragToZoom) {
+        return WRAPPER_STYLE_CROSSHAIR
+    }
+    return WRAPPER_STYLE_DEFAULT
+}
 
 const STATIC_CANVAS_STYLE: React.CSSProperties = { position: 'absolute', top: 0, left: 0 }
 const OVERLAY_CANVAS_STYLE: React.CSSProperties = {
@@ -85,6 +97,7 @@ export interface ChartProps<Meta = unknown> {
     drawHover: (args: ChartDrawArgs) => DrawHoverResult
     tooltip?: (ctx: TooltipContext<Meta>) => React.ReactNode
     onPointClick?: (data: PointClickData<Meta>) => void
+    onDateRangeZoom?: (data: DateRangeZoomData) => void
     className?: string
     dataAttr?: string
     children?: React.ReactNode
@@ -125,6 +138,7 @@ export function Chart<Meta = unknown>({
     drawHover,
     tooltip: renderTooltip = DefaultTooltip,
     onPointClick,
+    onDateRangeZoom,
     className,
     dataAttr,
     children,
@@ -192,7 +206,7 @@ export function Chart<Meta = unknown>({
 
     const { left: resolvedYFormatter, right: resolvedYRightFormatter } = useResolvedYFormatters(scales, yTickFormatter)
 
-    const { hoverIndex, hoverPosition, tooltipCtx, handlers } = useChartInteraction<Meta>({
+    const { hoverIndex, hoverPosition, tooltipCtx, dragRect, handlers } = useChartInteraction<Meta>({
         scales,
         dimensions,
         labels,
@@ -202,6 +216,7 @@ export function Chart<Meta = unknown>({
         showTooltip,
         pinnable: pinnableTooltip,
         onPointClick,
+        onDateRangeZoom,
         resolveValue,
         resolvePositionValue,
         interactionAxis,
@@ -211,16 +226,15 @@ export function Chart<Meta = unknown>({
 
     // ref keeps composedDrawHover stable across drawHover identity changes
     const drawHoverRef = useLatest(drawHover)
-    const composedDrawHover = useMemo(
-        () =>
-            composeDrawHoverWithCrosshair(() => drawHoverRef.current, {
-                crosshairColor: theme.crosshairColor,
-                showCrosshair,
-                axisOrientation,
-                labelToCoord,
-            }),
-        [showCrosshair, theme.crosshairColor, axisOrientation, labelToCoord, drawHoverRef.current]
-    )
+    const composedDrawHover = useMemo(() => {
+        const withCrosshair = composeDrawHoverWithCrosshair(() => drawHoverRef.current, {
+            crosshairColor: theme.crosshairColor,
+            showCrosshair,
+            axisOrientation,
+            labelToCoord,
+        })
+        return composeDrawHoverWithSelection(withCrosshair)
+    }, [showCrosshair, theme.crosshairColor, axisOrientation, labelToCoord, drawHoverRef.current])
 
     useChartDraw({
         ctx,
@@ -232,12 +246,13 @@ export function Chart<Meta = unknown>({
         hoverIndex,
         hoverPosition,
         theme,
+        dragRect,
         drawStatic,
         drawHover: composedDrawHover,
         hoverAnimationMs,
     })
 
-    const wrapperStyle = hoverIndex >= 0 && onPointClick ? WRAPPER_STYLE_POINTER : WRAPPER_STYLE_DEFAULT
+    const wrapperStyle = pickWrapperStyle(!!onDateRangeZoom, !!onPointClick, hoverIndex >= 0)
 
     const ariaLabel = useMemo(() => {
         const visible = coloredSeries.reduce((n, s) => n + (s.visibility?.excluded ? 0 : 1), 0)
@@ -294,6 +309,7 @@ export function Chart<Meta = unknown>({
                     className={className}
                     data-attr={dataAttr}
                     style={wrapperStyle}
+                    onMouseDown={handlers.onMouseDown}
                     onMouseMove={handlers.onMouseMove}
                     onMouseLeave={handlers.onMouseLeave}
                     onClick={handlers.onClick}
