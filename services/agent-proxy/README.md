@@ -64,7 +64,7 @@ caches the dotenv, so re-activate your shell or restart `hogli` after editing
 
 In the repo-root `.env` (read by Django web and the Temporal worker):
 
-```
+```bash
 DEBUG=1
 TASKS_AGENT_PROXY_PUBLIC_URL=http://localhost:8003   # browser read leg
 TASKS_AGENT_PROXY_INGEST_URL=http://localhost:8003   # sandbox ingest leg (auto-rewritten for the Docker sandbox)
@@ -90,7 +90,7 @@ PY
 
 Add that line plus these to the root `.env`:
 
-```
+```bash
 SANDBOX_JWT_PUBLIC_KEY="-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n"
 TASKS_AGENT_PROXY_CORS_ORIGINS=http://localhost:8010
 AGENT_PROXY_DJANGO_CALLBACK_URL=http://localhost:8000   # heartbeat + awaiting-input callbacks; omit to skip them
