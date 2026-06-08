@@ -808,6 +808,11 @@ class AssistantTool(StrEnum):
     MARKETING_SUGGEST_CONVERSION_GOALS = "marketing_suggest_conversion_goals"
     MARKETING_SUGGEST_UTM_MAPPINGS = "marketing_suggest_utm_mappings"
     SUMMARIZE_REPLAY_VISION_SUMMARIES = "summarize_replay_vision_summaries"
+    LIST_ACTIONS = "list_actions"
+    GET_ACTION = "get_action"
+    CREATE_ACTION = "create_action"
+    UPDATE_ACTION = "update_action"
+    DELETE_ACTION = "delete_action"
 
 
 class AssistantToolCall(BaseModel):

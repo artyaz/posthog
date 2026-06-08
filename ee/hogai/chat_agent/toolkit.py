@@ -21,8 +21,12 @@ from ee.hogai.core.agent_modes.toolkit import AgentToolkit, AgentToolkitManager
 from ee.hogai.registry import get_contextual_tool_class
 from ee.hogai.tool import MaxTool
 from ee.hogai.tools import (
+    CreateActionTool,
     CreateFormTool,
     CreateNotebookTool,
+    DeleteActionTool,
+    GetActionTool,
+    ListActionsTool,
     ListDataTool,
     ManageMemoriesTool,
     ReadDataTool,
@@ -31,6 +35,7 @@ from ee.hogai.tools import (
     SwitchModeTool,
     TaskTool,
     TodoWriteTool,
+    UpdateActionTool,
 )
 from ee.hogai.tools.call_mcp_server.tool import CallMCPServerTool
 from ee.hogai.tools.finalize_plan.tool import FinalizePlanTool
@@ -48,6 +53,11 @@ DEFAULT_TOOLS: list[type[MaxTool]] = [
     ReadDataTool,
     SearchTool,
     ListDataTool,
+    ListActionsTool,
+    GetActionTool,
+    CreateActionTool,
+    UpdateActionTool,
+    DeleteActionTool,
     TodoWriteTool,
     SwitchModeTool,
     CreateFormTool,
