@@ -52,28 +52,17 @@ from .sync_vectors import (
     get_approximate_actions_count,
 )
 
-AI_WORKFLOWS = [
-    SyncVectorsWorkflow,
-    AssistantConversationRunnerWorkflow,
-    ChatAgentWorkflow,
-    ResearchAgentWorkflow,
-    SummarizeLLMTracesWorkflow,
-    SlackConversationRunnerWorkflow,
+# The PostHog Code Slack workflows handed off to ProcessTaskWorkflow on the tasks
+# queue once a repo was picked, so the two queues were already paired. Exposing
+# them as a subset lets the tasks-agent worker register them alongside the AI
+# worker during the migration to a single queue.
+POSTHOG_CODE_SLACK_WORKFLOWS = [
     PostHogCodeSlackMentionWorkflow,
     PostHogCodeSlackMentionCommandWorkflow,
     PostHogCodeSlackTerminateTaskWorkflow,
-    AnomalyInvestigationWorkflow,
 ]
 
-AI_ACTIVITIES = [
-    get_approximate_actions_count,
-    batch_summarize_actions,
-    batch_embed_and_sync_actions,
-    process_conversation_activity,
-    process_chat_agent_activity,
-    process_research_agent_activity,
-    summarize_llm_traces_activity,
-    process_slack_conversation_activity,
+POSTHOG_CODE_SLACK_ACTIVITIES = [
     enforce_posthog_code_billing_quota_activity,
     resolve_posthog_code_slack_user_activity,
     handle_posthog_code_rules_command_activity,
@@ -92,6 +81,29 @@ AI_ACTIVITIES = [
     post_posthog_code_picker_timeout_activity,
     post_posthog_code_internal_error_activity,
     process_posthog_code_terminate_task_activity,
+]
+
+AI_WORKFLOWS = [
+    SyncVectorsWorkflow,
+    AssistantConversationRunnerWorkflow,
+    ChatAgentWorkflow,
+    ResearchAgentWorkflow,
+    SummarizeLLMTracesWorkflow,
+    SlackConversationRunnerWorkflow,
+    *POSTHOG_CODE_SLACK_WORKFLOWS,
+    AnomalyInvestigationWorkflow,
+]
+
+AI_ACTIVITIES = [
+    get_approximate_actions_count,
+    batch_summarize_actions,
+    batch_embed_and_sync_actions,
+    process_conversation_activity,
+    process_chat_agent_activity,
+    process_research_agent_activity,
+    summarize_llm_traces_activity,
+    process_slack_conversation_activity,
+    *POSTHOG_CODE_SLACK_ACTIVITIES,
     investigate_anomaly_activity,
 ]
 
