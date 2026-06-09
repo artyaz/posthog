@@ -2536,7 +2536,7 @@ class GoogleAdsTableKeywords(StrEnum):
     CAMPAIGN = "campaign"
 
 
-class Severity(StrEnum):
+class HealthCheckSeverity(StrEnum):
     CRITICAL = "critical"
     WARNING = "warning"
     INFO = "info"
@@ -2550,7 +2550,7 @@ class HealthCheckSignalExtra(BaseModel):
     kind: str
     link: str = Field(..., description="Relative in-app path to the resource, e.g. '/web'.")
     payload: dict[str, Any]
-    severity: Severity
+    severity: HealthCheckSeverity
     summary: str
     title: str
     url: str = Field(..., description="Absolute URL ({project.url} + link).")
@@ -4692,7 +4692,7 @@ class SignalsScoutEvidenceEntry(BaseModel):
     summary: str = Field(..., description="One-line summary of the evidence the scout used.")
 
 
-class Severity1(StrEnum):
+class Severity(StrEnum):
     P0 = "P0"
     P1 = "P1"
     P2 = "P2"
@@ -4728,7 +4728,7 @@ class SignalsScoutSignalExtra(BaseModel):
         description=("Trace id from the LLM analytics span for the scout run, when available."),
     )
     scout_run_id: str
-    severity: Severity1 | None = None
+    severity: Severity | None = None
     skill_name: str
     skill_version: float
     task_run_id: str = Field(

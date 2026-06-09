@@ -850,17 +850,20 @@ export interface EvidenceEntryApi {
 }
 
 /**
- * * `critical` - critical
- * `warning` - warning
- * `info` - info
+ * * `P0` - P0
+ * `P1` - P1
+ * `P2` - P2
+ * `P3` - P3
+ * `P4` - P4
  */
-export type EmitFindingRequestSeverityEnumApi =
-    (typeof EmitFindingRequestSeverityEnumApi)[keyof typeof EmitFindingRequestSeverityEnumApi]
+export type AutonomyPriorityEnumApi = (typeof AutonomyPriorityEnumApi)[keyof typeof AutonomyPriorityEnumApi]
 
-export const EmitFindingRequestSeverityEnumApi = {
-    Critical: 'critical',
-    Warning: 'warning',
-    Info: 'info',
+export const AutonomyPriorityEnumApi = {
+    P0: 'P0',
+    P1: 'P1',
+    P2: 'P2',
+    P3: 'P3',
+    P4: 'P4',
 } as const
 
 export interface TimeRangeApi {
@@ -903,10 +906,12 @@ export interface EmitFindingRequestApi {
     hypothesis?: string | null
     /** Optional severity tag — one of P0, P1, P2, P3, P4. Informational only.
 
-  * `critical` - critical
-  * `warning` - warning
-  * `info` - info */
-    severity?: EmitFindingRequestSeverityEnumApi | null
+  * `P0` - P0
+  * `P1` - P1
+  * `P2` - P2
+  * `P3` - P3
+  * `P4` - P4 */
+    severity?: AutonomyPriorityEnumApi | null
     /** Optional keys for downstream dedupe (e.g. `error_tracking_issue:<id>`). */
     dedupe_keys?: string[]
     /** Optional time window the finding refers to. */
@@ -1094,23 +1099,6 @@ export interface _UserApi {
     readonly last_name: string
     readonly email: string
 }
-
-/**
- * * `P0` - P0
- * `P1` - P1
- * `P2` - P2
- * `P3` - P3
- * `P4` - P4
- */
-export type AutonomyPriorityEnumApi = (typeof AutonomyPriorityEnumApi)[keyof typeof AutonomyPriorityEnumApi]
-
-export const AutonomyPriorityEnumApi = {
-    P0: 'P0',
-    P1: 'P1',
-    P2: 'P2',
-    P3: 'P3',
-    P4: 'P4',
-} as const
 
 export type BlankEnumApi = (typeof BlankEnumApi)[keyof typeof BlankEnumApi]
 

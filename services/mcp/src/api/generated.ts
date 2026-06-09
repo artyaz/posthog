@@ -14379,20 +14379,6 @@ export namespace Schemas {
       entity_id?: string | null;
     }
 
-    /**
-     * * `critical` - critical
-    * `warning` - warning
-    * `info` - info
-     */
-    export type EmitFindingRequestSeverityEnum = typeof EmitFindingRequestSeverityEnum[keyof typeof EmitFindingRequestSeverityEnum];
-
-
-    export const EmitFindingRequestSeverityEnum = {
-      Critical: 'critical',
-      Warning: 'warning',
-      Info: 'info',
-    } as const;
-
     export interface TimeRange {
       /** ISO-8601 inclusive lower bound for the finding's window. */
       date_from: string;
@@ -14433,10 +14419,12 @@ export namespace Schemas {
       hypothesis?: string | null;
       /** Optional severity tag — one of P0, P1, P2, P3, P4. Informational only.
 
-      * `critical` - critical
-      * `warning` - warning
-      * `info` - info */
-      severity?: EmitFindingRequestSeverityEnum | null;
+      * `P0` - P0
+      * `P1` - P1
+      * `P2` - P2
+      * `P3` - P3
+      * `P4` - P4 */
+      severity?: AutonomyPriorityEnum | null;
       /** Optional keys for downstream dedupe (e.g. `error_tracking_issue:<id>`). */
       dedupe_keys?: string[];
       /** Optional time window the finding refers to. */

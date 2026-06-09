@@ -364,9 +364,11 @@ export interface LogsAlertStateChangeSignalInput extends SignalInputBase {
 
 // Health-check issue (instrumentation problem detected by a HealthCheck)
 
+export type HealthCheckSeverity = 'critical' | 'warning' | 'info'
+
 export interface HealthCheckSignalExtra extends SignalExtraBase {
     kind: string
-    severity: 'critical' | 'warning' | 'info'
+    severity: HealthCheckSeverity
     issue_id: string
     title: string
     summary: string

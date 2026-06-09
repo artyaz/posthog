@@ -154,13 +154,13 @@ export const SignalsScoutEmitSignalBody = /* @__PURE__ */ zod
         severity: zod
             .union([
                 zod
-                    .enum(['critical', 'warning', 'info'])
-                    .describe('\* `critical` - critical\n\* `warning` - warning\n\* `info` - info'),
+                    .enum(['P0', 'P1', 'P2', 'P3', 'P4'])
+                    .describe('\* `P0` - P0\n\* `P1` - P1\n\* `P2` - P2\n\* `P3` - P3\n\* `P4` - P4'),
                 zod.null(),
             ])
             .optional()
             .describe(
-                'Optional severity tag — one of P0, P1, P2, P3, P4. Informational only.\n\n\* `critical` - critical\n\* `warning` - warning\n\* `info` - info'
+                'Optional severity tag — one of P0, P1, P2, P3, P4. Informational only.\n\n\* `P0` - P0\n\* `P1` - P1\n\* `P2` - P2\n\* `P3` - P3\n\* `P4` - P4'
             ),
         dedupe_keys: zod
             .array(zod.string())
