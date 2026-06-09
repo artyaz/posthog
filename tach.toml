@@ -677,12 +677,14 @@ from = [
 # ACTIVITIES and WORKFLOWS from each product's backend.temporal package. Eight peer products do the same
 # thing, but experiments is the first isolated product to register a workflow, so the canonical interface
 # doesn't cover it yet. Narrowly expose just the registration symbols rather than widening every isolated
-# product's surface.
+# product's surface. The recalculation_metrics module is also exposed because posthog/temporal/common/worker.py
+# imports its interceptor and histogram bucket constants when assembling the worker.
 
 [[interfaces]]
 expose = [
     "backend\\.temporal\\.ACTIVITIES",
     "backend\\.temporal\\.WORKFLOWS",
+    "backend\\.temporal\\.recalculation_metrics.*",
 ]
 from = [
     "products.experiments",
