@@ -281,7 +281,7 @@ function makeRedisStream(fakeRedis: FakeRedis, runId: string): TaskRunRedisStrea
 function makeConfig(overrides?: Partial<Config>): Config {
     return {
         redisUrl: 'redis://localhost:6379',
-        sandboxJwtPublicKeyPem: '',
+        sandboxJwtPublicKeysPem: [],
         corsOrigins: new Set(),
         djangoCallbackBaseUrl: '',
         agentProxyCallbackSecret: '',
@@ -417,14 +417,14 @@ describe('ingest-handler', () => {
     it('returns 405 on non-POST', async () => {
         const config = makeConfig()
         const ctx = makeContext({ method: 'GET' })
-        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, {} as CryptoKey)
+        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, [] as CryptoKey[])
         expect(res.status).toBe(405)
     })
 
     it('returns 401 when Authorization header is missing', async () => {
         const config = makeConfig()
         const ctx = makeContext({ token: '' })
-        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, {} as CryptoKey)
+        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, [] as CryptoKey[])
         expect(res.status).toBe(401)
     })
 
@@ -432,7 +432,7 @@ describe('ingest-handler', () => {
         mockValidate.mockRejectedValue(new Error('invalid signature'))
         const config = makeConfig()
         const ctx = makeContext({ body: makeStringBody('') })
-        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, {} as CryptoKey)
+        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, [] as CryptoKey[])
         expect(res.status).toBe(401)
     })
 
@@ -440,7 +440,7 @@ describe('ingest-handler', () => {
         mockValidate.mockResolvedValue(makeClaims({ runId: 'different-run' }))
         const config = makeConfig()
         const ctx = makeContext({ body: makeStringBody('') })
-        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, {} as CryptoKey)
+        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, [] as CryptoKey[])
         expect(res.status).toBe(403)
     })
 
@@ -452,7 +452,7 @@ describe('ingest-handler', () => {
         const config = makeConfig()
         const ndjson = JSON.stringify({ seq: 1, event: { type: 'message' } }) + '\n'
         const ctx = makeContext({ body: makeStringBody(ndjson) })
-        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, {} as CryptoKey)
+        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, [] as CryptoKey[])
         expect(res.status).toBe(200)
         const body = await decodeJson(res)
         expect(body).toMatchObject({ accepted: 1, duplicate: 0, last_accepted_seq: 1 })
@@ -467,7 +467,7 @@ describe('ingest-handler', () => {
                 JSON.stringify({ seq: 3, event: { type: 'c' } }),
             ].join('\n') + '\n'
         const ctx = makeContext({ body: makeStringBody(lines) })
-        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, {} as CryptoKey)
+        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, [] as CryptoKey[])
         expect(res.status).toBe(200)
         const body = (await decodeJson(res)) as { accepted: number; duplicate: number; last_accepted_seq: number }
         expect(body.accepted).toBe(3)
@@ -484,12 +484,12 @@ describe('ingest-handler', () => {
         // First request: accept seq 1
         const ndjson1 = JSON.stringify({ seq: 1, event: { type: 'first' } }) + '\n'
         const ctx1 = makeContext({ body: makeStringBody(ndjson1) })
-        await handleIngest(ctx1, fakeRedis as unknown as Redis, config, {} as CryptoKey)
+        await handleIngest(ctx1, fakeRedis as unknown as Redis, config, [] as CryptoKey[])
 
         // Second request: resend seq 1 → duplicate
         const ndjson2 = JSON.stringify({ seq: 1, event: { type: 'first-again' } }) + '\n'
         const ctx2 = makeContext({ body: makeStringBody(ndjson2) })
-        const res2 = await handleIngest(ctx2, fakeRedis as unknown as Redis, config, {} as CryptoKey)
+        const res2 = await handleIngest(ctx2, fakeRedis as unknown as Redis, config, [] as CryptoKey[])
         expect(res2.status).toBe(200)
         const body = (await decodeJson(res2)) as { accepted: number; duplicate: number; last_accepted_seq: number }
         expect(body.accepted).toBe(0)
@@ -505,7 +505,7 @@ describe('ingest-handler', () => {
             makeContext({ body: makeStringBody(seed) }),
             fakeRedis as unknown as Redis,
             config,
-            {} as CryptoKey
+            [] as CryptoKey[]
         )
 
         // Resend seq 1 + new seq 2
@@ -518,7 +518,7 @@ describe('ingest-handler', () => {
             makeContext({ body: makeStringBody(mixed) }),
             fakeRedis as unknown as Redis,
             config,
-            {} as CryptoKey
+            [] as CryptoKey[]
         )
         expect(res.status).toBe(200)
         const body = (await decodeJson(res)) as { accepted: number; duplicate: number; last_accepted_seq: number }
@@ -536,7 +536,7 @@ describe('ingest-handler', () => {
         // seq 2 without first accepting seq 1
         const ndjson = JSON.stringify({ seq: 2, event: { type: 'jump' } }) + '\n'
         const ctx = makeContext({ body: makeStringBody(ndjson) })
-        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, {} as CryptoKey)
+        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, [] as CryptoKey[])
         expect(res.status).toBe(409)
         const body = (await decodeJson(res)) as { last_accepted_seq: number }
         expect(body.last_accepted_seq).toBe(0)
@@ -553,7 +553,7 @@ describe('ingest-handler', () => {
             makeContext({ body: makeStringBody(setup) }),
             fakeRedis as unknown as Redis,
             config,
-            {} as CryptoKey
+            [] as CryptoKey[]
         )
 
         // Now send seq 4 (gap at 3)
@@ -562,7 +562,7 @@ describe('ingest-handler', () => {
             makeContext({ body: makeStringBody(gap) }),
             fakeRedis as unknown as Redis,
             config,
-            {} as CryptoKey
+            [] as CryptoKey[]
         )
         expect(res.status).toBe(409)
         const body = (await decodeJson(res)) as { last_accepted_seq: number }
@@ -585,7 +585,7 @@ describe('ingest-handler', () => {
             makeContext({ body: makeStringBody(ndjson1) }),
             fakeRedis as unknown as Redis,
             config,
-            {} as CryptoKey
+            [] as CryptoKey[]
         )
 
         // Second request: try to write seq 2
@@ -594,7 +594,7 @@ describe('ingest-handler', () => {
             makeContext({ body: makeStringBody(ndjson2) }),
             fakeRedis as unknown as Redis,
             config,
-            {} as CryptoKey
+            [] as CryptoKey[]
         )
         expect(res.status).toBe(409)
         const body = (await decodeJson(res)) as { last_accepted_seq: number }
@@ -613,7 +613,7 @@ describe('ingest-handler', () => {
                 JSON.stringify({ type: '_posthog/stream_complete', final_seq: 1 }),
             ].join('\n') + '\n'
         const ctx = makeContext({ body: makeStringBody(ndjson) })
-        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, {} as CryptoKey)
+        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, [] as CryptoKey[])
         expect(res.status).toBe(200)
         const body = (await decodeJson(res)) as { accepted: number; last_accepted_seq: number }
         expect(body.accepted).toBe(1)
@@ -641,7 +641,7 @@ describe('ingest-handler', () => {
                 JSON.stringify({ type: '_posthog/stream_complete', final_seq: 2 }),
             ].join('\n') + '\n'
         const ctx = makeContext({ body: makeStringBody(ndjson) })
-        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, {} as CryptoKey)
+        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, [] as CryptoKey[])
         expect(res.status).toBe(409)
         const body = (await decodeJson(res)) as { last_accepted_seq: number }
         expect(body.last_accepted_seq).toBe(1)
@@ -651,7 +651,7 @@ describe('ingest-handler', () => {
         const config = makeConfig()
         const ndjson = JSON.stringify({ type: '_posthog/stream_complete', final_seq: 0 }) + '\n'
         const ctx = makeContext({ body: makeStringBody(ndjson) })
-        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, {} as CryptoKey)
+        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, [] as CryptoKey[])
         expect(res.status).toBe(200)
     })
 
@@ -663,7 +663,7 @@ describe('ingest-handler', () => {
                 JSON.stringify({ seq: 1, event: { type: 'after' } }),
             ].join('\n') + '\n'
         const ctx = makeContext({ body: makeStringBody(ndjson) })
-        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, {} as CryptoKey)
+        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, [] as CryptoKey[])
         expect(res.status).toBe(400)
     })
 
@@ -675,7 +675,7 @@ describe('ingest-handler', () => {
                 JSON.stringify({ type: '_posthog/stream_complete', final_seq: 0 }),
             ].join('\n') + '\n'
         const ctx = makeContext({ body: makeStringBody(ndjson) })
-        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, {} as CryptoKey)
+        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, [] as CryptoKey[])
         expect(res.status).toBe(400)
     })
 
@@ -693,7 +693,7 @@ describe('ingest-handler', () => {
         const chunk2 = enc.encode(full.slice(mid))
         const body = makeChunkedBody([chunk1, chunk2])
         const ctx = makeContext({ body })
-        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, {} as CryptoKey)
+        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, [] as CryptoKey[])
         expect(res.status).toBe(200)
         const rb = (await decodeJson(res)) as { accepted: number }
         expect(rb.accepted).toBe(1)
@@ -708,7 +708,7 @@ describe('ingest-handler', () => {
         const chunks = [enc.encode(line1), enc.encode('\n'), enc.encode(line2), enc.encode('\n')]
         const body = makeChunkedBody(chunks)
         const ctx = makeContext({ body })
-        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, {} as CryptoKey)
+        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, [] as CryptoKey[])
         expect(res.status).toBe(200)
         const rb = (await decodeJson(res)) as { accepted: number }
         expect(rb.accepted).toBe(2)
@@ -719,7 +719,7 @@ describe('ingest-handler', () => {
         const line = JSON.stringify({ seq: 1, event: { type: 'no-newline' } })
         // No trailing newline — the flush-on-done path handles it
         const ctx = makeContext({ body: makeStringBody(line) })
-        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, {} as CryptoKey)
+        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, [] as CryptoKey[])
         expect(res.status).toBe(200)
         const rb = (await decodeJson(res)) as { accepted: number }
         expect(rb.accepted).toBe(1)
@@ -734,7 +734,7 @@ describe('ingest-handler', () => {
             JSON.stringify({ seq: 2, event: { type: 'b' } }) +
             '\n'
         const ctx = makeContext({ body: makeStringBody(ndjson) })
-        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, {} as CryptoKey)
+        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, [] as CryptoKey[])
         expect(res.status).toBe(200)
         const rb = (await decodeJson(res)) as { accepted: number }
         expect(rb.accepted).toBe(2)
@@ -761,7 +761,7 @@ describe('ingest-handler', () => {
 
         const body = makeChunkedBody([enc.encode(line1), enc.encode(line2)])
         const ctx = makeContext({ body })
-        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, {} as CryptoKey)
+        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, [] as CryptoKey[])
         expect(res.status).toBe(413)
         const rb = (await decodeJson(res)) as { last_accepted_seq: number }
         // seq 1 was accepted (chunk 1 was processed) before chunk 2 exceeded the limit
@@ -774,7 +774,7 @@ describe('ingest-handler', () => {
         const hugePayload = 'y'.repeat(MAX_EVENT_LINE_BYTES + 1)
         const ndjson = JSON.stringify({ seq: 1, event: { data: hugePayload } }) + '\n'
         const ctx = makeContext({ body: makeStringBody(ndjson) })
-        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, {} as CryptoKey)
+        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, [] as CryptoKey[])
         expect(res.status).toBe(413)
     })
 
@@ -786,7 +786,7 @@ describe('ingest-handler', () => {
         }
         const ndjson = lines.join('\n') + '\n'
         const ctx = makeContext({ body: makeStringBody(ndjson) })
-        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, {} as CryptoKey)
+        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, [] as CryptoKey[])
         expect(res.status).toBe(413)
         const body = (await decodeJson(res)) as { last_accepted_seq: number }
         // last_accepted_seq should be MAX_EVENTS_PER_REQUEST (the last accepted before the limit)
@@ -800,35 +800,35 @@ describe('ingest-handler', () => {
     it('returns 400 for invalid JSON', async () => {
         const config = makeConfig()
         const ctx = makeContext({ body: makeStringBody('not json\n') })
-        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, {} as CryptoKey)
+        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, [] as CryptoKey[])
         expect(res.status).toBe(400)
     })
 
     it('returns 400 for a JSON array (not an object)', async () => {
         const config = makeConfig()
         const ctx = makeContext({ body: makeStringBody('[1,2]\n') })
-        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, {} as CryptoKey)
+        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, [] as CryptoKey[])
         expect(res.status).toBe(400)
     })
 
     it('returns 400 for seq=0 (must be >= 1)', async () => {
         const config = makeConfig()
         const ctx = makeContext({ body: makeStringBody(JSON.stringify({ seq: 0, event: {} }) + '\n') })
-        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, {} as CryptoKey)
+        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, [] as CryptoKey[])
         expect(res.status).toBe(400)
     })
 
     it('returns 400 when seq is not an integer', async () => {
         const config = makeConfig()
         const ctx = makeContext({ body: makeStringBody(JSON.stringify({ seq: 1.5, event: {} }) + '\n') })
-        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, {} as CryptoKey)
+        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, [] as CryptoKey[])
         expect(res.status).toBe(400)
     })
 
     it('returns 400 when event field is not an object', async () => {
         const config = makeConfig()
         const ctx = makeContext({ body: makeStringBody(JSON.stringify({ seq: 1, event: 'string' }) + '\n') })
-        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, {} as CryptoKey)
+        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, [] as CryptoKey[])
         expect(res.status).toBe(400)
     })
 
@@ -837,7 +837,7 @@ describe('ingest-handler', () => {
         const ctx = makeContext({
             body: makeStringBody(JSON.stringify({ type: '_posthog/stream_complete', final_seq: -1 }) + '\n'),
         })
-        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, {} as CryptoKey)
+        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, [] as CryptoKey[])
         expect(res.status).toBe(400)
     })
 
@@ -846,7 +846,7 @@ describe('ingest-handler', () => {
         const ctx = makeContext({
             body: makeStringBody(JSON.stringify({ type: '_posthog/stream_complete', final_seq: 1.5 }) + '\n'),
         })
-        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, {} as CryptoKey)
+        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, [] as CryptoKey[])
         expect(res.status).toBe(400)
     })
 
@@ -857,7 +857,7 @@ describe('ingest-handler', () => {
     it('returns 200 with accepted=0 for an empty body', async () => {
         const config = makeConfig()
         const ctx = makeContext({ body: makeStringBody('') })
-        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, {} as CryptoKey)
+        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, [] as CryptoKey[])
         expect(res.status).toBe(200)
         const body = (await decodeJson(res)) as { accepted: number; duplicate: number; last_accepted_seq: number }
         expect(body.accepted).toBe(0)
@@ -886,7 +886,7 @@ describe('ingest-handler', () => {
         }
         const ndjson = JSON.stringify({ seq: 1, event: turnCompleteEvent }) + '\n'
         const ctx = makeContext({ body: makeStringBody(ndjson) })
-        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, {} as CryptoKey)
+        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, [] as CryptoKey[])
         expect(res.status).toBe(200)
 
         // Agent must have been set inactive.
@@ -924,7 +924,7 @@ describe('ingest-handler', () => {
         }
         const ndjson = JSON.stringify({ seq: 1, event: sessionUpdateEvent }) + '\n'
         const ctx = makeContext({ body: makeStringBody(ndjson) })
-        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, {} as CryptoKey)
+        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, [] as CryptoKey[])
         expect(res.status).toBe(200)
 
         const agentActive = await redisStream.getAgentActive()
@@ -968,7 +968,7 @@ describe('ingest-handler', () => {
                 JSON.stringify({ seq: 2, event: { type: 'other' } }),
             ].join('\n') + '\n'
         const ctx = makeContext({ body: makeStringBody(ndjson) })
-        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, {} as CryptoKey)
+        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, [] as CryptoKey[])
         expect(res.status).toBe(200)
 
         await new Promise((r) => setTimeout(r, 0))
@@ -1000,7 +1000,7 @@ describe('ingest-handler', () => {
         }
         const ndjson = JSON.stringify({ seq: 1, event: turnCompleteEvent }) + '\n'
         const ctx = makeContext({ body: makeStringBody(ndjson) })
-        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, {} as CryptoKey)
+        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, [] as CryptoKey[])
         // Callback failure must NOT affect ingest response
         expect(res.status).toBe(200)
 
@@ -1022,7 +1022,7 @@ describe('ingest-handler', () => {
         }
         const ndjson = JSON.stringify({ seq: 1, event: turnCompleteEvent }) + '\n'
         const ctx = makeContext({ body: makeStringBody(ndjson) })
-        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, {} as CryptoKey)
+        const res = await handleIngest(ctx, fakeRedis as unknown as Redis, config, [] as CryptoKey[])
         expect(res.status).toBe(200)
 
         await new Promise((r) => setTimeout(r, 10))

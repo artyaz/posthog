@@ -42,7 +42,7 @@ export interface App {
 // Factory
 // ---------------------------------------------------------------------------
 
-export function createApp(redis: Redis, config: Config, publicKey: CryptoKey): App {
+export function createApp(redis: Redis, config: Config, publicKeys: CryptoKey[]): App {
     const app = new Hono()
     const lifecycle: Lifecycle = { shuttingDown: false }
 
@@ -67,7 +67,7 @@ export function createApp(redis: Redis, config: Config, publicKey: CryptoKey): A
 
         let claims: StreamReadTokenPayload
         try {
-            claims = await validateStreamReadToken(token, publicKey)
+            claims = await validateStreamReadToken(token, publicKeys)
         } catch (err: unknown) {
             const code = err instanceof Error ? err.constructor.name : 'UnknownError'
             return c.json({ error: 'Invalid stream read token', code }, 401)
@@ -137,7 +137,7 @@ export function createApp(redis: Redis, config: Config, publicKey: CryptoKey): A
 
     // -- NDJSON event ingest --
     app.post('/v1/runs/:run/ingest', async (c) => {
-        return handleIngest(c, redis, config, publicKey)
+        return handleIngest(c, redis, config, publicKeys)
     })
 
     // -- Catch-all 404 --

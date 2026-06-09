@@ -1,14 +1,19 @@
 // JWT verification for the agent-proxy service.
 //
 // Verify-only: this service never signs tokens. The private key is never loaded.
-// Both legs (stream-read and sandbox event ingest) use the same RS256 public key
-// from SANDBOX_JWT_PUBLIC_KEY (normalized in config.ts before reaching here).
+// Both legs (stream-read and sandbox event ingest) verify RS256 tokens against the
+// public keys from SANDBOX_JWT_PUBLIC_KEY plus the optional SANDBOX_JWT_PUBLIC_KEY_SECONDARY
+// (normalized in config.ts before reaching here).
 //
-// Kid-based key rotation is NOT implemented. When jwtVerify receives a concrete
-// CryptoKey (rather than a JWKS), jose ignores the kid header entirely — which is
-// the intended behavior per the design (single configured key, no kid logic needed).
+// Zero-downtime key rotation: a token is verified against every configured public key in
+// turn and accepted if any one validates the signature. This mirrors Django's
+// SANDBOX_JWT_PRIVATE_KEY / _SECONDARY signing registry — during a rotation overlap the proxy
+// trusts both the old and the new key, so flipping Django's primary signing key never rejects
+// an in-flight token. jose ignores the token's kid for a concrete CryptoKey, so the keys are
+// simply tried in order; only a signature mismatch advances to the next key (expiry, wrong
+// audience and malformed claims are key-independent and fail fast).
 
-import { importSPKI, jwtVerify } from 'jose'
+import { errors, importSPKI, jwtVerify, type JWTPayload } from 'jose'
 
 import { SANDBOX_EVENT_INGEST_AUDIENCE, STREAM_READ_AUDIENCE } from './constants.js'
 import type { SandboxEventIngestTokenPayload, StreamReadTokenPayload } from './types.js'
@@ -17,10 +22,11 @@ import type { SandboxEventIngestTokenPayload, StreamReadTokenPayload } from './t
 // Public key loading
 // ---------------------------------------------------------------------------
 
-// Call once at startup with config.sandboxJwtPublicKeyPem (already normalized).
-// The returned CryptoKey is cached by the caller for the process lifetime.
-export async function loadPublicKey(pemRaw: string): Promise<CryptoKey> {
-    return importSPKI(pemRaw, 'RS256')
+// Call once at startup with config.sandboxJwtPublicKeysPem (already normalized): the primary
+// key first, then any rotation-secondary key. The returned CryptoKeys are cached by the caller
+// for the process lifetime.
+export async function loadPublicKeys(pemsRaw: string[]): Promise<CryptoKey[]> {
+    return Promise.all(pemsRaw.map((pem) => importSPKI(pem, 'RS256')))
 }
 
 // ---------------------------------------------------------------------------
@@ -54,6 +60,27 @@ function assertStreamClaims(payload: Record<string, unknown>): { runId: string; 
     return { runId, taskId, teamId: teamId as number }
 }
 
+// Verify a token against every configured public key, returning the payload from the first key
+// whose signature validates. Only a signature mismatch advances to the next key; expiry, wrong
+// audience and malformed claims are key-independent and fail fast. This is what makes a
+// primary-key rotation zero-downtime.
+async function verifyWithKeys(token: string, publicKeys: CryptoKey[], audience: string): Promise<JWTPayload> {
+    let lastSignatureError: unknown
+    for (const key of publicKeys) {
+        try {
+            const { payload } = await jwtVerify(token, key, { algorithms: ['RS256'], audience })
+            return payload
+        } catch (err) {
+            if (err instanceof errors.JWSSignatureVerificationFailed) {
+                lastSignatureError = err
+                continue
+            }
+            throw err
+        }
+    }
+    throw lastSignatureError ?? new Error('Token signature verification failed: no public keys configured')
+}
+
 // ---------------------------------------------------------------------------
 // Stream-read token  (GET /v1/runs/:run/stream leg)
 // ---------------------------------------------------------------------------
@@ -65,14 +92,9 @@ function assertStreamClaims(payload: Record<string, unknown>): { runId: string; 
 // Throws jose error subtypes (JWTExpired, JWTInvalid, JWSSignatureVerificationFailed,
 // JWTClaimValidationFailed, etc.) on bad signature, wrong audience or expiry; throws
 // a plain Error on malformed claim types. The server maps all of these to 401.
-export async function validateStreamReadToken(token: string, publicKey: CryptoKey): Promise<StreamReadTokenPayload> {
-    const { payload } = await jwtVerify(token, publicKey, {
-        algorithms: ['RS256'],
-        audience: STREAM_READ_AUDIENCE,
-    })
-
-    const claims = assertStreamClaims(payload as Record<string, unknown>)
-    return claims
+export async function validateStreamReadToken(token: string, publicKeys: CryptoKey[]): Promise<StreamReadTokenPayload> {
+    const payload = await verifyWithKeys(token, publicKeys, STREAM_READ_AUDIENCE)
+    return assertStreamClaims(payload as Record<string, unknown>)
 }
 
 // ---------------------------------------------------------------------------
@@ -86,13 +108,8 @@ export async function validateStreamReadToken(token: string, publicKey: CryptoKe
 // Same error semantics as validateStreamReadToken.
 export async function validateSandboxEventIngestToken(
     token: string,
-    publicKey: CryptoKey
+    publicKeys: CryptoKey[]
 ): Promise<SandboxEventIngestTokenPayload> {
-    const { payload } = await jwtVerify(token, publicKey, {
-        algorithms: ['RS256'],
-        audience: SANDBOX_EVENT_INGEST_AUDIENCE,
-    })
-
-    const claims = assertStreamClaims(payload as Record<string, unknown>)
-    return claims
+    const payload = await verifyWithKeys(token, publicKeys, SANDBOX_EVENT_INGEST_AUDIENCE)
+    return assertStreamClaims(payload as Record<string, unknown>)
 }

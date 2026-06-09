@@ -12,7 +12,7 @@ import { serve } from '@hono/node-server'
 import Redis from 'ioredis'
 
 import { loadConfig } from '../lib/config.js'
-import { loadPublicKey } from '../lib/jwt.js'
+import { loadPublicKeys } from '../lib/jwt.js'
 import { logger } from '../lib/logging.js'
 import { createApp } from './app.js'
 import { registerShutdownHandlers } from './shutdown.js'
@@ -46,15 +46,15 @@ async function main(): Promise<void> {
         process.exit(1)
     }
 
-    let publicKey: globalThis.CryptoKey
+    let publicKeys: globalThis.CryptoKey[]
     try {
-        publicKey = await loadPublicKey(config.sandboxJwtPublicKeyPem)
+        publicKeys = await loadPublicKeys(config.sandboxJwtPublicKeysPem)
     } catch (err) {
         logger.error('jwt:public_key_load_failed', { error: err instanceof Error ? err.message : String(err) })
         process.exit(1)
     }
 
-    const { app, lifecycle } = createApp(redis, config, publicKey)
+    const { app, lifecycle } = createApp(redis, config, publicKeys)
 
     const server = serve({ fetch: app.fetch, port: config.port, hostname: config.host }, (info) => {
         logger.info('server:started', { host: config.host, port: info.port })

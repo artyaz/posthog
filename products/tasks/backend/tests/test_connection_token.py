@@ -100,24 +100,36 @@ class TestSandboxJwtRotation(SimpleTestCase):
         token = create_sandbox_connection_token(_fake_run({}), user_id=1, distinct_id="d")
         self.assertEqual(jwt.get_unverified_header(token)["kid"], KID_A)
 
-    @override_settings(SANDBOX_JWT_PRIVATE_KEY=KEY_B, SANDBOX_JWT_PRIVATE_KEY_SECONDARY=KEY_A)
-    def test_ingest_token_always_uses_primary_ignoring_run_kid(self) -> None:
+    @override_settings(
+        SANDBOX_JWT_PRIVATE_KEY=KEY_B, SANDBOX_JWT_PRIVATE_KEY_SECONDARY=KEY_A, SANDBOX_JWT_PUBLIC_KEY=None
+    )
+    def test_ingest_token_signed_with_run_stored_kid(self) -> None:
         reset_sandbox_jwt_key_cache()
-        # The ingest path is single-key: it signs/validates with the primary key only and
-        # ignores the run's stored kid (unlike the connection token).
+        # Like the connection token, the ingest token now carries a kid and is signed with the key
+        # the run was provisioned under, so the agent-proxy legs survive a primary-key rotation.
         token = create_sandbox_event_ingest_token(_fake_run({SANDBOX_JWT_STATE_KID_KEY: KID_A}))
-        self.assertNotIn("kid", jwt.get_unverified_header(token))
+        self.assertEqual(jwt.get_unverified_header(token)["kid"], KID_A)
         payload = validate_sandbox_event_ingest_token(token)
         self.assertEqual(payload.team_id, 1)
 
-    def test_ingest_token_rejected_after_primary_rotation(self) -> None:
-        # Ingest is intentionally NOT rotation-safe: a token signed under the old primary
-        # stops validating once the primary is rotated, even if the old key is kept as secondary.
+    def test_ingest_token_validates_after_primary_rotation(self) -> None:
+        # Ingest is rotation-safe: a token signed under the old primary keeps validating after the
+        # primary rotates, as long as the old key is retained as the secondary.
         with override_settings(SANDBOX_JWT_PRIVATE_KEY=KEY_A, SANDBOX_JWT_PRIVATE_KEY_SECONDARY=None):
             reset_sandbox_jwt_key_cache()
             token = create_sandbox_event_ingest_token(_fake_run())
 
-        with override_settings(SANDBOX_JWT_PRIVATE_KEY=KEY_B, SANDBOX_JWT_PRIVATE_KEY_SECONDARY=KEY_A):
+        with override_settings(
+            SANDBOX_JWT_PRIVATE_KEY=KEY_B, SANDBOX_JWT_PRIVATE_KEY_SECONDARY=KEY_A, SANDBOX_JWT_PUBLIC_KEY=None
+        ):
+            reset_sandbox_jwt_key_cache()
+            payload = validate_sandbox_event_ingest_token(token)
+            self.assertEqual(payload.team_id, 1)
+
+        # Once the old key is dropped entirely the token no longer validates.
+        with override_settings(
+            SANDBOX_JWT_PRIVATE_KEY=KEY_B, SANDBOX_JWT_PRIVATE_KEY_SECONDARY=None, SANDBOX_JWT_PUBLIC_KEY=None
+        ):
             reset_sandbox_jwt_key_cache()
             with self.assertRaises(jwt.InvalidTokenError):
                 validate_sandbox_event_ingest_token(token)
@@ -147,7 +159,7 @@ _TASK_ID = "22222222-2222-2222-2222-222222222222"
 
 
 def _fake_task_run() -> TaskRun:
-    return cast(TaskRun, SimpleNamespace(id=_RUN_ID, task_id=_TASK_ID, team_id=7))
+    return cast(TaskRun, SimpleNamespace(id=_RUN_ID, task_id=_TASK_ID, team_id=7, state={}))
 
 
 @override_settings(SANDBOX_JWT_PRIVATE_KEY=TEST_RSA_PRIVATE_KEY, SANDBOX_JWT_PUBLIC_KEY=None)

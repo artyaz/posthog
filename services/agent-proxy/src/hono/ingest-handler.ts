@@ -45,7 +45,12 @@ import { observeStreamIngestEvents } from './metrics.js'
 // Route handler (exported; wired in app.ts)
 // ---------------------------------------------------------------------------
 
-export async function handleIngest(c: Context, redis: Redis, config: Config, publicKey: CryptoKey): Promise<Response> {
+export async function handleIngest(
+    c: Context,
+    redis: Redis,
+    config: Config,
+    publicKeys: CryptoKey[]
+): Promise<Response> {
     // Method guard (Hono enforces the route method, but keep an explicit check
     // so the handler is safe when registered on a catch-all route too).
     if (c.req.method !== 'POST') {
@@ -61,7 +66,7 @@ export async function handleIngest(c: Context, redis: Redis, config: Config, pub
     // JWT validation.
     let claims: SandboxEventIngestTokenPayload
     try {
-        claims = await validateSandboxEventIngestToken(token, publicKey)
+        claims = await validateSandboxEventIngestToken(token, publicKeys)
     } catch (err: unknown) {
         const code = err instanceof Error ? err.constructor.name : 'UnknownError'
         return c.json({ error: 'Invalid event ingest token', code }, 401)

@@ -47,13 +47,15 @@ and is not used by agent-proxy.
 
 ## Key rotation without downtime
 
-### The gap today
+### How it works
 
-The two tokens agent-proxy verifies are signed with Django's **primary** key and carry **no `kid`
-header** (`connection_token.py` `create_stream_read_token` / `create_sandbox_event_ingest_token`).
-agent-proxy loads exactly **one** public key. There is no JWKS endpoint and no secondary public
-key setting. The kid registry that exists for the `sandbox_connection` token does not cover the
-agent-proxy legs, so rotating the primary key is **not** zero-downtime there today.
+Both tokens agent-proxy verifies are signed with the key the run was provisioned under and carry a
+`kid` header (`connection_token.py` `_encode_run_scoped_token`), reusing the same key registry the
+`sandbox_connection` token already uses. agent-proxy trusts a **set** of public keys —
+`SANDBOX_JWT_PUBLIC_KEY` plus the optional `SANDBOX_JWT_PUBLIC_KEY_SECONDARY` — and accepts a token
+that verifies under **any** of them (`verifyWithKeys`); only a signature mismatch advances to the
+next key. Django verifies the same way against its registry (`_decode_sandbox_token`). So rotating
+the primary key is zero-downtime across all three token legs, not just `sandbox_connection`.
 
 ### The principle
 

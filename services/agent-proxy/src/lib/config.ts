@@ -6,6 +6,7 @@
 //   AGENT_PROXY_DJANGO_CALLBACK_URL
 //
 // Optional with defaults:
+//   SANDBOX_JWT_PUBLIC_KEY_SECONDARY — extra public key trusted during key rotation
 //   TASKS_AGENT_PROXY_CORS_ORIGINS  — comma-separated origins; '' disables CORS
 //   PORT                            — default 8003
 //   HOST                            — default '0.0.0.0'
@@ -17,8 +18,9 @@ import { logger } from './logging.js'
 
 export interface Config {
     redisUrl: string
-    // PEM string with real newlines (backslash-n sequences normalized before storage)
-    sandboxJwtPublicKeyPem: string
+    // PEM strings with real newlines (backslash-n sequences normalized before storage). The
+    // primary key first, then an optional rotation-secondary key; a token verifies against any.
+    sandboxJwtPublicKeysPem: string[]
     // Parsed from comma-separated TASKS_AGENT_PROXY_CORS_ORIGINS; '*' = all origins
     corsOrigins: Set<string>
     // Base URL of the internal Django service (no trailing slash)
@@ -69,8 +71,11 @@ export function loadConfig(): Config {
     // nosemgrep: trailofbits.generic.redis-unencrypted-transport.redis-unencrypted-transport
     const redisUrl = getEnv('REDIS_URL') ?? (isProd ? requireEnv('REDIS_URL', true) : 'redis://localhost:6379')
 
-    const rawPublicKey = requireEnv('SANDBOX_JWT_PUBLIC_KEY', isProd)
-    const sandboxJwtPublicKeyPem = normalizePemKey(rawPublicKey)
+    // Primary key (required) plus an optional secondary trusted during a key rotation overlap.
+    const sandboxJwtPublicKeysPem = [
+        normalizePemKey(requireEnv('SANDBOX_JWT_PUBLIC_KEY', isProd)),
+        normalizePemKey(getEnv('SANDBOX_JWT_PUBLIC_KEY_SECONDARY') ?? ''),
+    ].filter((pem) => pem.length > 0)
 
     const djangoCallbackBaseUrl = requireEnv('AGENT_PROXY_DJANGO_CALLBACK_URL', isProd)
 
@@ -94,7 +99,7 @@ export function loadConfig(): Config {
 
     return {
         redisUrl,
-        sandboxJwtPublicKeyPem,
+        sandboxJwtPublicKeysPem,
         corsOrigins,
         djangoCallbackBaseUrl,
         agentProxyCallbackSecret,
