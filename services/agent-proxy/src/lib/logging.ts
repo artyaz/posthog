@@ -68,7 +68,15 @@ export const logger = {
 // ---------------------------------------------------------------------------
 
 // Header names that must never appear in logs — values replaced with '[REDACTED]'.
-export const SENSITIVE_HEADERS = new Set(['authorization', 'cookie', 'x-api-key'])
+// x-csrftoken and x-posthog-session-id carry per-user browser tokens that api.stream
+// sends on every request, so they are redacted alongside the standard auth headers.
+export const SENSITIVE_HEADERS = new Set([
+    'authorization',
+    'cookie',
+    'x-api-key',
+    'x-csrftoken',
+    'x-posthog-session-id',
+])
 
 // Return a copy of `headers` with sensitive values replaced by '[REDACTED]'.
 // Comparison is case-insensitive to handle both canonical and lowercased names.
