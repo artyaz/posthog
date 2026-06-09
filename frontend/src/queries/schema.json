@@ -22217,7 +22217,6 @@
             ]
         },
         "HealthCheckSeverity": {
-            "description": "Health-check issue severity. A named type (not an inline union) so it generates its own enum instead of colliding with the scout's P0–P4 `severity` field during schema.py codegen.",
             "enum": ["critical", "warning", "info"],
             "type": "string"
         },
