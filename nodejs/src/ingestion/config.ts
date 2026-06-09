@@ -162,6 +162,15 @@ export type IngestionConsumerConfig = {
     EVENT_SCHEMA_ENFORCEMENT_ENABLED: boolean
     KAFKA_BATCH_START_LOGGING_ENABLED: boolean
 
+    // $feature_flag_called keep-first dedup config
+    /** 'disabled' | 'shadow' (claim + count, never drop) | 'drop' */
+    INGESTION_FEATURE_FLAG_CALLED_DEDUP_MODE: string
+    /** '*' for all teams, or comma-separated team IDs */
+    INGESTION_FEATURE_FLAG_CALLED_DEDUP_TEAMS: string
+    /** Comma-separated team IDs never deduped, even when TEAMS is '*' */
+    INGESTION_FEATURE_FLAG_CALLED_DEDUP_EXCLUDED_TEAMS: string
+    INGESTION_FEATURE_FLAG_CALLED_DEDUP_TTL_SECONDS: number
+
     // AI event splitting config
     INGESTION_AI_EVENT_SPLITTING_ENABLED: boolean
     /** '*' for all teams, or comma-separated team IDs always routed to ai_events */
@@ -272,6 +281,12 @@ export function getDefaultIngestionConsumerConfig(): IngestionConsumerConfig {
         SKIP_UPDATE_EVENT_AND_PROPERTIES_STEP: false,
         EVENT_SCHEMA_ENFORCEMENT_ENABLED: true,
         KAFKA_BATCH_START_LOGGING_ENABLED: false,
+
+        // $feature_flag_called keep-first dedup config
+        INGESTION_FEATURE_FLAG_CALLED_DEDUP_MODE: 'disabled',
+        INGESTION_FEATURE_FLAG_CALLED_DEDUP_TEAMS: '',
+        INGESTION_FEATURE_FLAG_CALLED_DEDUP_EXCLUDED_TEAMS: '',
+        INGESTION_FEATURE_FLAG_CALLED_DEDUP_TTL_SECONDS: 24 * 60 * 60,
 
         // AI event splitting config
         INGESTION_AI_EVENT_SPLITTING_ENABLED: false,

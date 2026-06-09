@@ -16,6 +16,7 @@ import { CookielessManager } from '../cookieless/cookieless-manager'
 import {
     createApplyCookielessProcessingStep,
     createApplyPersonProcessingRestrictionsStep,
+    createDedupeFeatureFlagCalledStep,
     createOnlyCookielessRateLimitToOverflowStep,
     createOverflowLaneTTLRefreshStep,
     createValidateEventMetadataStep,
@@ -25,6 +26,7 @@ import {
 import { createDropOldEventsStep } from '../event-processing/drop-old-events-step'
 import { createPrefetchHogFunctionsStep } from '../event-processing/prefetch-hog-functions-step'
 import { BatchPipelineBuilder } from '../pipelines/builders/batch-pipeline-builders'
+import { FeatureFlagCalledDedupService } from '../utils/feature-flag-called-dedup/feature-flag-called-dedup-service'
 import { OverflowRedirectService } from '../utils/overflow-redirect/overflow-redirect-service'
 
 export interface PostTeamPreprocessingSubpipelineInput {
@@ -44,6 +46,7 @@ export interface PostTeamPreprocessingSubpipelineConfig {
     preservePartitionLocality: boolean
     overflowRedirectService?: OverflowRedirectService
     overflowLaneTTLRefreshService?: OverflowRedirectService
+    featureFlagCalledDedupService?: FeatureFlagCalledDedupService
     personsStore: PersonsStore
     personsPrefetchEnabled: boolean
     hogTransformer: HogTransformerService
@@ -63,6 +66,7 @@ export function createPostTeamPreprocessingSubpipeline<TInput extends PostTeamPr
         preservePartitionLocality,
         overflowRedirectService,
         overflowLaneTTLRefreshService,
+        featureFlagCalledDedupService,
         personsStore,
         personsPrefetchEnabled,
         hogTransformer,
@@ -96,6 +100,10 @@ export function createPostTeamPreprocessingSubpipeline<TInput extends PostTeamPr
             .pipeBatch(createOnlyCookielessRateLimitToOverflowStep(preservePartitionLocality, overflowRedirectService))
             // Refresh TTLs for overflow lane events (keeps Redis flags alive)
             .pipeBatch(createOverflowLaneTTLRefreshStep(overflowLaneTTLRefreshService))
+            // Drop redundant $feature_flag_called events (keep-first Redis claim).
+            // Must run after cookieless (keys on the final distinct_id) and before
+            // person prefetch so duplicates skip person processing and the CH write.
+            .pipeBatch(createDedupeFeatureFlagCalledStep(featureFlagCalledDedupService))
             // Prefetch must run after cookieless, as cookieless changes distinct IDs.
             // Prefetch is fire-and-forget (best-effort cache warming), so retry here would be a
             // no-op — transient persons-Postgres failures are swallowed inside prefetchPersons so

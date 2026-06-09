@@ -51,6 +51,7 @@ import { KafkaProducerRegistry } from '../ingestion/outputs/kafka-producer-regis
 import { buildGroupRepository, buildPersonRepository, createPersonHogClient } from '../ingestion/personhog'
 import { createOkContext } from '../ingestion/pipelines/helpers'
 import { TopHog } from '../ingestion/tophog'
+import { createFeatureFlagCalledDedupService } from '../ingestion/utils/feature-flag-called-dedup/feature-flag-called-dedup-service'
 import { MainLaneOverflowRedirect } from '../ingestion/utils/overflow-redirect/main-lane-overflow-redirect'
 import { OverflowLaneOverflowRedirect } from '../ingestion/utils/overflow-redirect/overflow-lane-overflow-redirect'
 import { OverflowRedirectService } from '../ingestion/utils/overflow-redirect/overflow-redirect-service'
@@ -350,6 +351,8 @@ export class IngestionApiServer implements NodeServer {
             concurrentBatches: this.config.INGESTION_WORKER_CONCURRENT_BATCHES,
         }
         const eventFilterManagerStarted = await new EventFilterManagerComponent(this.postgres).start()
+        const featureFlagCalledDedupService = createFeatureFlagCalledDedupService(this.redisPool, this.config)
+
         const joinedPipelineDeps: JoinedIngestionPipelineDeps = {
             personsStore,
             groupStore,
@@ -360,6 +363,7 @@ export class IngestionApiServer implements NodeServer {
             promiseScheduler: this.promiseScheduler,
             overflowRedirectService,
             overflowLaneTTLRefreshService,
+            featureFlagCalledDedupService,
             teamManager,
             cookielessManager: this.cookielessManager,
             groupTypeManager,
