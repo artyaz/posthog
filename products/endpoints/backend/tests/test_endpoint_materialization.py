@@ -24,10 +24,11 @@ from posthog.sync import database_sync_to_async
 from products.data_modeling.backend.models.datawarehouse_saved_query import DataWarehouseSavedQuery
 from products.data_modeling.backend.models.modeling import DataWarehouseModelPath
 from products.data_warehouse.backend.data_load.saved_query_service import get_saved_query_schedule
-from products.endpoints.backend.api import EndpointViewSet
 from products.endpoints.backend.materialization import build_endpoint_hogql
 from products.endpoints.backend.models import EndpointVersion
-from products.endpoints.backend.services.endpoint_materialization_service import (
+from products.endpoints.backend.services.execution import EndpointExecutionService
+from products.endpoints.backend.services.materialization import (
+    EndpointMaterializationService,
     OrphanedEndpointSavedQueryError,
     prepare_executable_query,
 )
@@ -627,7 +628,9 @@ class TestEndpointMaterialization(ClickhouseTestMixin, APIBaseTest):
         )
         saved_query.save()
 
-        with mock.patch("products.endpoints.backend.api.EndpointViewSet._execute_query_and_respond") as mock_execute:
+        with mock.patch(
+            "products.endpoints.backend.services.execution.EndpointExecutionService._execute_query_and_respond"
+        ) as mock_execute:
             old_cache_time = timezone.now() - timedelta(minutes=30)
             old_cached_response = Response(
                 {
@@ -670,7 +673,9 @@ class TestEndpointMaterialization(ClickhouseTestMixin, APIBaseTest):
         )
         new_saved_query.save()
 
-        with mock.patch("products.endpoints.backend.api.EndpointViewSet._execute_query_and_respond") as mock_execute:
+        with mock.patch(
+            "products.endpoints.backend.services.execution.EndpointExecutionService._execute_query_and_respond"
+        ) as mock_execute:
             new_cache_time = timezone.now() - timedelta(minutes=5)
             new_cached_response = Response(
                 {
@@ -777,9 +782,11 @@ class TestEndpointMaterialization(ClickhouseTestMixin, APIBaseTest):
         # Mock the execution methods to track which path is taken
         with (
             mock.patch.object(
-                EndpointViewSet, "_execute_materialized_endpoint", return_value=Response({})
+                EndpointExecutionService, "_execute_materialized_endpoint", return_value=Response({})
             ) as mock_materialized,
-            mock.patch.object(EndpointViewSet, "_execute_inline_endpoint", return_value=Response({})) as mock_inline,
+            mock.patch.object(
+                EndpointExecutionService, "_execute_inline_endpoint", return_value=Response({})
+            ) as mock_inline,
         ):
             response = self.client.post(
                 f"/api/environments/{self.team.id}/endpoints/{endpoint.name}/run",
@@ -828,9 +835,11 @@ class TestEndpointMaterialization(ClickhouseTestMixin, APIBaseTest):
         # Mock the execution methods to track which path is taken
         with (
             mock.patch.object(
-                EndpointViewSet, "_execute_materialized_endpoint", return_value=Response({})
+                EndpointExecutionService, "_execute_materialized_endpoint", return_value=Response({})
             ) as mock_materialized,
-            mock.patch.object(EndpointViewSet, "_execute_inline_endpoint", return_value=Response({})) as mock_inline,
+            mock.patch.object(
+                EndpointExecutionService, "_execute_inline_endpoint", return_value=Response({})
+            ) as mock_inline,
         ):
             response = self.client.post(
                 f"/api/environments/{self.team.id}/endpoints/{endpoint.name}/run",
@@ -877,9 +886,11 @@ class TestEndpointMaterialization(ClickhouseTestMixin, APIBaseTest):
 
         with (
             mock.patch.object(
-                EndpointViewSet, "_execute_materialized_endpoint", return_value=Response({})
+                EndpointExecutionService, "_execute_materialized_endpoint", return_value=Response({})
             ) as mock_materialized,
-            mock.patch.object(EndpointViewSet, "_execute_inline_endpoint", return_value=Response({})) as mock_inline,
+            mock.patch.object(
+                EndpointExecutionService, "_execute_inline_endpoint", return_value=Response({})
+            ) as mock_inline,
         ):
             response = self.client.post(
                 f"/api/environments/{self.team.id}/endpoints/{endpoint.name}/run",
@@ -926,9 +937,11 @@ class TestEndpointMaterialization(ClickhouseTestMixin, APIBaseTest):
 
         with (
             mock.patch.object(
-                EndpointViewSet, "_execute_materialized_endpoint", return_value=Response({})
+                EndpointExecutionService, "_execute_materialized_endpoint", return_value=Response({})
             ) as mock_materialized,
-            mock.patch.object(EndpointViewSet, "_execute_inline_endpoint", return_value=Response({})) as mock_inline,
+            mock.patch.object(
+                EndpointExecutionService, "_execute_inline_endpoint", return_value=Response({})
+            ) as mock_inline,
         ):
             response = self.client.post(
                 f"/api/environments/{self.team.id}/endpoints/{endpoint.name}/run",
@@ -1035,7 +1048,9 @@ class TestEndpointMaterialization(ClickhouseTestMixin, APIBaseTest):
 
         # Execute the endpoint and verify it uses the materialized path correctly
         # Must provide the breakdown variable (required for security - prevents data leakage)
-        with mock.patch.object(EndpointViewSet, "_execute_query_and_respond", return_value=Response({})) as mock_exec:
+        with mock.patch.object(
+            EndpointExecutionService, "_execute_query_and_respond", return_value=Response({})
+        ) as mock_exec:
             response = self.client.post(
                 f"/api/environments/{self.team.id}/endpoints/{endpoint.name}/run",
                 {"variables": {"$browser": "Chrome"}},
@@ -1130,7 +1145,9 @@ class TestEndpointMaterialization(ClickhouseTestMixin, APIBaseTest):
         saved_query.save()
 
         # Execute with variable filter
-        with mock.patch.object(EndpointViewSet, "_execute_query_and_respond", return_value=Response({})) as mock_exec:
+        with mock.patch.object(
+            EndpointExecutionService, "_execute_query_and_respond", return_value=Response({})
+        ) as mock_exec:
             response = self.client.post(
                 f"/api/environments/{self.team.id}/endpoints/{endpoint.name}/run",
                 {"variables": {"event_name": "$pageview"}},
@@ -1352,7 +1369,9 @@ class TestEndpointMaterialization(ClickhouseTestMixin, APIBaseTest):
         # Update with a new query — version creation succeeds, but materialization fails
         new_query = {"kind": "HogQLQuery", "query": "SELECT * FROM events WHERE timestamp > now() - INTERVAL 1 DAY"}
         with mock.patch.object(
-            EndpointViewSet, "_enable_materialization_inner", side_effect=Exception("Temporal unavailable")
+            EndpointMaterializationService,
+            "_enable_materialization_inner",
+            side_effect=Exception("Temporal unavailable"),
         ):
             response = self.client.put(
                 f"/api/environments/{self.team.id}/endpoints/{endpoint.name}/",
@@ -1380,7 +1399,9 @@ class TestEndpointMaterialization(ClickhouseTestMixin, APIBaseTest):
         )
 
         with mock.patch.object(
-            EndpointViewSet, "_enable_materialization_inner", side_effect=Exception("Temporal unavailable")
+            EndpointMaterializationService,
+            "_enable_materialization_inner",
+            side_effect=Exception("Temporal unavailable"),
         ):
             response = self.client.patch(
                 f"/api/environments/{self.team.id}/endpoints/{endpoint.name}/",

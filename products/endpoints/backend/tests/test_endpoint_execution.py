@@ -10,7 +10,7 @@ from rest_framework.response import Response
 from posthog.schema import EventsNode, TrendsQuery
 
 from products.data_modeling.backend.models.datawarehouse_saved_query import DataWarehouseSavedQuery
-from products.endpoints.backend.api import EndpointViewSet
+from products.endpoints.backend.services.execution import EndpointExecutionService
 from products.endpoints.backend.tests.conftest import create_endpoint_with_version
 from products.product_analytics.backend.models.insight_variable import InsightVariable
 from products.warehouse_sources.backend.models.table import DataWarehouseTable
@@ -462,7 +462,9 @@ class TestEndpointExecution(ClickhouseTestMixin, APIBaseTest):
         self._materialize_endpoint(endpoint)
 
         # Execute with variable filter - should filter materialized table by event_name
-        with mock.patch.object(EndpointViewSet, "_execute_query_and_respond", return_value=Response({})) as mock_exec:
+        with mock.patch.object(
+            EndpointExecutionService, "_execute_query_and_respond", return_value=Response({})
+        ) as mock_exec:
             response = self.client.post(
                 f"/api/environments/{self.team.id}/endpoints/{endpoint.name}/run/",
                 {"variables": {"event_name": "$pageleave"}},
@@ -497,7 +499,9 @@ class TestEndpointExecution(ClickhouseTestMixin, APIBaseTest):
         )
         self._materialize_endpoint(endpoint)
 
-        with mock.patch.object(EndpointViewSet, "_execute_query_and_respond", return_value=Response({})) as mock_exec:
+        with mock.patch.object(
+            EndpointExecutionService, "_execute_query_and_respond", return_value=Response({})
+        ) as mock_exec:
             self.client.post(
                 f"/api/environments/{self.team.id}/endpoints/{endpoint.name}/run/",
                 {"variables": {"event_name": "$pageview"}},
@@ -685,9 +689,11 @@ class TestEndpointExecution(ClickhouseTestMixin, APIBaseTest):
         # refresh: direct should bypass materialization and run inline
         with (
             mock.patch.object(
-                EndpointViewSet, "_execute_materialized_endpoint", return_value=Response({})
+                EndpointExecutionService, "_execute_materialized_endpoint", return_value=Response({})
             ) as mock_materialized,
-            mock.patch.object(EndpointViewSet, "_execute_inline_endpoint", return_value=Response({})) as mock_inline,
+            mock.patch.object(
+                EndpointExecutionService, "_execute_inline_endpoint", return_value=Response({})
+            ) as mock_inline,
         ):
             response = self.client.post(
                 f"/api/environments/{self.team.id}/endpoints/{endpoint.name}/run/",
@@ -732,7 +738,9 @@ class TestEndpointExecution(ClickhouseTestMixin, APIBaseTest):
         )
         self._materialize_endpoint(endpoint)
 
-        with mock.patch.object(EndpointViewSet, "_execute_query_and_respond", return_value=Response({})) as mock_exec:
+        with mock.patch.object(
+            EndpointExecutionService, "_execute_query_and_respond", return_value=Response({})
+        ) as mock_exec:
             response = self.client.post(
                 f"/api/environments/{self.team.id}/endpoints/{endpoint.name}/run/",
                 {"variables": {"event_name": "$pageleave", "browser": "Safari"}},
@@ -787,7 +795,9 @@ class TestEndpointExecution(ClickhouseTestMixin, APIBaseTest):
         )
         self._materialize_endpoint(endpoint)
 
-        with mock.patch.object(EndpointViewSet, "_execute_query_and_respond", return_value=Response({})) as mock_exec:
+        with mock.patch.object(
+            EndpointExecutionService, "_execute_query_and_respond", return_value=Response({})
+        ) as mock_exec:
             response = self.client.post(
                 f"/api/environments/{self.team.id}/endpoints/{endpoint.name}/run/",
                 {"variables": {"start_date": "2026-01-05", "end_date": "2026-01-08"}},
@@ -856,7 +866,9 @@ class TestEndpointExecution(ClickhouseTestMixin, APIBaseTest):
         )
         self._materialize_endpoint(endpoint)
 
-        with mock.patch.object(EndpointViewSet, "_execute_query_and_respond", return_value=Response({})) as mock_exec:
+        with mock.patch.object(
+            EndpointExecutionService, "_execute_query_and_respond", return_value=Response({})
+        ) as mock_exec:
             response = self.client.post(
                 f"/api/environments/{self.team.id}/endpoints/{endpoint.name}/run/",
                 {"variables": {"start_ts": "2026-01-05", "end_ts": "2026-01-08", "host": "example.com"}},
@@ -900,7 +912,9 @@ class TestEndpointExecution(ClickhouseTestMixin, APIBaseTest):
         )
         self._materialize_endpoint(endpoint)
 
-        with mock.patch.object(EndpointViewSet, "_execute_query_and_respond", return_value=Response({})) as mock_exec:
+        with mock.patch.object(
+            EndpointExecutionService, "_execute_query_and_respond", return_value=Response({})
+        ) as mock_exec:
             run_data = {}
             if request_limit is not None:
                 run_data["limit"] = request_limit
@@ -934,7 +948,9 @@ class TestEndpointExecution(ClickhouseTestMixin, APIBaseTest):
         self._materialize_endpoint(endpoint)
 
         # Filter by breakdown using actual property name
-        with mock.patch.object(EndpointViewSet, "_execute_query_and_respond", return_value=Response({})) as mock_exec:
+        with mock.patch.object(
+            EndpointExecutionService, "_execute_query_and_respond", return_value=Response({})
+        ) as mock_exec:
             response = self.client.post(
                 f"/api/environments/{self.team.id}/endpoints/{endpoint.name}/run/",
                 {"variables": {"$browser": "Chrome"}},
@@ -967,7 +983,9 @@ class TestEndpointExecution(ClickhouseTestMixin, APIBaseTest):
         )
         self._materialize_endpoint(endpoint)
 
-        with mock.patch.object(EndpointViewSet, "_execute_query_and_respond", return_value=Response({})) as mock_exec:
+        with mock.patch.object(
+            EndpointExecutionService, "_execute_query_and_respond", return_value=Response({})
+        ) as mock_exec:
             response = self.client.post(
                 f"/api/environments/{self.team.id}/endpoints/{endpoint.name}/run/",
                 {"variables": {"$browser": "Chrome", "$os": "Mac"}},
@@ -1004,7 +1022,9 @@ class TestEndpointExecution(ClickhouseTestMixin, APIBaseTest):
         )
         self._materialize_endpoint(endpoint)
 
-        with mock.patch.object(EndpointViewSet, "_execute_query_and_respond", return_value=Response({})) as mock_exec:
+        with mock.patch.object(
+            EndpointExecutionService, "_execute_query_and_respond", return_value=Response({})
+        ) as mock_exec:
             response = self.client.post(
                 f"/api/environments/{self.team.id}/endpoints/{endpoint.name}/run/",
                 {"variables": {"$browser": "Chrome", "$os": "Mac", "$device_type": "Desktop"}},
@@ -1131,7 +1151,9 @@ class TestEndpointExecution(ClickhouseTestMixin, APIBaseTest):
         self._materialize_endpoint(endpoint)
 
         # Using filters_override instead of variables should work (backwards compat)
-        with mock.patch.object(EndpointViewSet, "_execute_query_and_respond", return_value=Response({})) as mock_exec:
+        with mock.patch.object(
+            EndpointExecutionService, "_execute_query_and_respond", return_value=Response({})
+        ) as mock_exec:
             response = self.client.post(
                 f"/api/environments/{self.team.id}/endpoints/{endpoint.name}/run/",
                 {"filters_override": {"properties": [{"key": "$browser", "value": "Chrome", "type": "event"}]}},
@@ -1153,9 +1175,11 @@ class TestEndpointExecution(ClickhouseTestMixin, APIBaseTest):
 
         with (
             mock.patch.object(
-                EndpointViewSet, "_execute_materialized_endpoint", return_value=Response({})
+                EndpointExecutionService, "_execute_materialized_endpoint", return_value=Response({})
             ) as mock_materialized,
-            mock.patch.object(EndpointViewSet, "_execute_inline_endpoint", return_value=Response({})) as mock_inline,
+            mock.patch.object(
+                EndpointExecutionService, "_execute_inline_endpoint", return_value=Response({})
+            ) as mock_inline,
         ):
             response = self.client.post(
                 f"/api/environments/{self.team.id}/endpoints/{endpoint.name}/run/",
@@ -1517,7 +1541,7 @@ class TestEndpointExecution(ClickhouseTestMixin, APIBaseTest):
         fake_results = [{"event": "$pageview", "distinct_id": "user1"}] * num_result_rows
 
         with mock.patch.object(
-            EndpointViewSet,
+            EndpointExecutionService,
             "_execute_query_and_respond",
             return_value=Response({"results": fake_results}),
         ) as mock_exec:
@@ -1571,7 +1595,7 @@ class TestEndpointExecution(ClickhouseTestMixin, APIBaseTest):
         fake_results = [{"event": "$pageview", "count()": 10}] * 5
 
         with mock.patch.object(
-            EndpointViewSet,
+            EndpointExecutionService,
             "_execute_query_and_respond",
             return_value=Response({"results": fake_results}),
         ) as mock_exec:
@@ -1616,7 +1640,7 @@ class TestEndpointExecution(ClickhouseTestMixin, APIBaseTest):
         fake_results = [{"event": "$pageview", "distinct_id": "user1"}] * num_result_rows
 
         with mock.patch.object(
-            EndpointViewSet,
+            EndpointExecutionService,
             "_execute_query_and_respond",
             return_value=Response({"results": fake_results}),
         ) as mock_exec:
@@ -1710,7 +1734,7 @@ class TestEndpointExecution(ClickhouseTestMixin, APIBaseTest):
     # BREAKDOWN SENTINEL CLEANUP
     # =========================================================================
 
-    @mock.patch("products.endpoints.backend.api.process_query_model")
+    @mock.patch("products.endpoints.backend.services.execution.process_query_model")
     def test_inline_insight_sentinel_null_cleaned_from_breakdown_value(self, mock_process):
         mock_process.return_value = {
             "results": [
@@ -1737,7 +1761,7 @@ class TestEndpointExecution(ClickhouseTestMixin, APIBaseTest):
         self.assertEqual(results[0]["breakdown_value"], ["Chrome", None])
         self.assertIsNone(results[1]["breakdown_value"])
 
-    @mock.patch("products.endpoints.backend.api.process_query_model")
+    @mock.patch("products.endpoints.backend.services.execution.process_query_model")
     def test_inline_insight_sentinel_cleaned_from_label(self, mock_process):
         mock_process.return_value = {
             "results": [
@@ -1766,7 +1790,7 @@ class TestEndpointExecution(ClickhouseTestMixin, APIBaseTest):
         results = response.json()["results"]
         self.assertEqual(results[0]["label"], "Chrome::null")
 
-    @mock.patch("products.endpoints.backend.api.process_query_model")
+    @mock.patch("products.endpoints.backend.services.execution.process_query_model")
     def test_hogql_result_sentinel_cleaned_from_breakdown_column(self, mock_process):
         mock_process.return_value = {
             "results": [
@@ -1821,7 +1845,7 @@ class TestEndpointExecution(ClickhouseTestMixin, APIBaseTest):
         # Patch the limit to a low value so the 30 distinct breakdown values exceed it
         with (
             mock.patch("products.endpoints.backend.materialization.ENDPOINT_BREAKDOWN_LIMIT", 5),
-            mock.patch("products.endpoints.backend.api.capture_exception") as mock_capture,
+            mock.patch("products.endpoints.backend.services.execution.capture_exception") as mock_capture,
         ):
             response = self.client.post(
                 f"/api/environments/{self.team.id}/endpoints/{endpoint.name}/run/",
@@ -1909,7 +1933,9 @@ class TestEndpointExecution(ClickhouseTestMixin, APIBaseTest):
         )
         self._materialize_endpoint(endpoint)
 
-        with mock.patch.object(EndpointViewSet, "_execute_query_and_respond", return_value=Response({})) as mock_exec:
+        with mock.patch.object(
+            EndpointExecutionService, "_execute_query_and_respond", return_value=Response({})
+        ) as mock_exec:
             response = self.client.post(
                 f"/api/environments/{self.team.id}/endpoints/{endpoint.name}/run/",
                 {"variables": {"event_name": "$pageview"}},
@@ -2143,15 +2169,14 @@ class TestEndpointExecution(ClickhouseTestMixin, APIBaseTest):
     def test_disable_materialization_no_op_does_not_increment_counter(self):
         from prometheus_client import REGISTRY
 
-        from products.endpoints.backend.api import EndpointViewSet
+        from products.endpoints.backend.services.materialization import EndpointMaterializationService
 
         endpoint = self._make_simple_hogql_endpoint("metric_disable_no_op")
         labels = {"action": "disable", "status": "success"}
         before = REGISTRY.get_sample_value("posthog_endpoint_materialization_event_total", labels) or 0.0
 
-        viewset = EndpointViewSet()
-        viewset.team_id = self.team.id
-        viewset._disable_materialization(endpoint, mock.MagicMock())
+        service = EndpointMaterializationService(self.team, mock.MagicMock())
+        service.disable_materialization(endpoint)
 
         after = REGISTRY.get_sample_value("posthog_endpoint_materialization_event_total", labels) or 0.0
         self.assertEqual(after - before, 0.0)
@@ -2162,8 +2187,8 @@ class TestEndpointExecution(ClickhouseTestMixin, APIBaseTest):
         boom = RuntimeError("synthetic failure")
 
         with (
-            mock.patch("products.endpoints.backend.api.process_query_model", side_effect=boom),
-            mock.patch("products.endpoints.backend.api._emit_endpoint_failure_signal") as mock_emit,
+            mock.patch("products.endpoints.backend.services.execution.process_query_model", side_effect=boom),
+            mock.patch("products.endpoints.backend.services.execution._emit_endpoint_failure_signal") as mock_emit,
         ):
             response = self.client.post(
                 f"/api/environments/{self.team.id}/endpoints/{endpoint.name}/run/",
@@ -2181,7 +2206,7 @@ class TestEndpointExecution(ClickhouseTestMixin, APIBaseTest):
 
     def test_emit_failure_signal_swallows_errors(self):
         """Signal emission must never mask the original exception."""
-        from products.endpoints.backend.api import _emit_endpoint_failure_signal
+        from products.endpoints.backend.services.execution import _emit_endpoint_failure_signal
 
         endpoint = self._make_simple_hogql_endpoint("failure_signal_swallow")
 

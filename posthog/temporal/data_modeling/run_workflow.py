@@ -73,7 +73,7 @@ from products.data_warehouse.backend.data_load.create_table import create_table_
 from products.data_warehouse.backend.data_load.saved_query_service import a_pause_saved_query_schedule
 from products.data_warehouse.backend.s3 import ensure_bucket_exists, get_s3_client
 from products.endpoints.backend.rate_limit import set_endpoint_materialization_ready
-from products.endpoints.backend.services.endpoint_materialization_service import prepare_executable_query
+from products.endpoints.backend.services.materialization import prepare_executable_query
 from products.warehouse_sources.backend.models.table import DataWarehouseTable
 
 LOGGER = get_logger(__name__)

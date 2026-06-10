@@ -1721,7 +1721,7 @@ class TestMaterializedReadPath(APIBaseTest):
 
     def _build_read_query(self, query_str: str, variables_meta: dict, variable_values: dict) -> str:
         """Simulate the materialized read path: analyze variables, then build a SELECT with filters."""
-        from products.endpoints.backend.api import EndpointViewSet
+        from products.endpoints.backend.services.strategies import apply_where_filter
 
         hogql_query = {"kind": "HogQLQuery", "query": query_str, "variables": variables_meta}
         _, _, var_infos = analyze_variables_for_materialization(hogql_query)
@@ -1731,11 +1731,10 @@ class TestMaterializedReadPath(APIBaseTest):
             select_from=ast.JoinExpr(table=ast.Field(chain=["materialized_table"])),
         )
 
-        viewset = EndpointViewSet()
         for mat_var in var_infos:
             var_value = variable_values.get(mat_var.code_name)
             if var_value is not None:
-                viewset._apply_where_filter(
+                apply_where_filter(
                     select_query,
                     mat_var.code_name,
                     var_value,
