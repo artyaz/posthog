@@ -1193,14 +1193,30 @@ def _truncate_used_in_queryset(qs: QuerySet) -> tuple[list[dict], int]:
     return page[:COHORT_USED_IN_PAGE_SIZE], qs.count()
 
 
+def _flags_with_cohort_filters(cohort: Cohort) -> QuerySet[FeatureFlag]:
+    """Return non-deleted flags in the cohort's project whose filters contain any cohort property.
+
+    DB-side pre-filter for the ``get_cohort_ids()`` expansion in the callers below, so
+    only flags that reference some cohort are loaded into Python instead of every flag
+    in the project. Matching any cohort-type property — rather than this specific cohort
+    id — is required for correctness: a flag that only transitively references this
+    cohort (via another cohort) still directly references some cohort, so this predicate
+    is a strict superset of the flags the expansion can match.
+    """
+    # nosemgrep: python.django.security.audit.query-set-extra.avoid-query-set-extra (static predicate, no user input)
+    return (
+        FeatureFlag.objects.filter(team__project_id=cohort.team.project_id, deleted=False)
+        .extra(where=["""jsonb_path_exists(filters, '$.** ? (@.type == "cohort")')"""])
+        .select_related("team")
+    )
+
+
 def get_active_flags_using_cohort(cohort: Cohort) -> list[FeatureFlag]:
     """Return active, non-deleted feature flags that reference this cohort.
 
     Used by deletion protection — only live flags should block cohort deletion.
     """
-    active_flags = FeatureFlag.objects.filter(
-        team__project_id=cohort.team.project_id, active=True, deleted=False
-    ).select_related("team")
+    active_flags = _flags_with_cohort_filters(cohort).filter(active=True)
     seen_cohorts_cache: dict[int, CohortOrEmpty] = {}
     return [flag for flag in active_flags if cohort.id in flag.get_cohort_ids(seen_cohorts_cache=seen_cohorts_cache)]
 
@@ -1212,7 +1228,7 @@ def get_flags_using_cohort(cohort: Cohort) -> list[FeatureFlag]:
     are aware before flipping one back on. Excludes soft-deleted flags for consistency
     with ``get_insights_using_cohort`` and ``get_cohorts_using_cohort``.
     """
-    flags = FeatureFlag.objects.filter(team__project_id=cohort.team.project_id, deleted=False).select_related("team")
+    flags = _flags_with_cohort_filters(cohort)
     seen_cohorts_cache: dict[int, CohortOrEmpty] = {}
     return [flag for flag in flags if cohort.id in flag.get_cohort_ids(seen_cohorts_cache=seen_cohorts_cache)]
 
