@@ -350,7 +350,7 @@ class Insight(RootTeamMixin, FileSystemSyncMixin, models.Model):
     @property
     def is_funnel_backed(self) -> bool:
         """True when the underlying query (unwrapped from any wrapper) is a FunnelsQuery."""
-        return self._unwrapped_query_kind() == "FunnelsQuery"
+        return self._unwrapped_query_kind() == NodeKind.FUNNELS_QUERY
 
     def generate_query_metadata(self):
         from posthog.hogql_queries.query_metadata import extract_query_metadata

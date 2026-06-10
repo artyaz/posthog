@@ -14,6 +14,7 @@ from posthog.schema import (
     AlertConditionType,
     AlertState,
     ChartDisplayType,
+    FunnelConversionMetric,
     FunnelsAlertConfig,
     HogQLAlertConfig,
     HogQLAlertEvaluation,
@@ -164,7 +165,10 @@ def validate_alert_config(
             parsed_funnel_config = FunnelsAlertConfig.model_validate(config)
         except Exception:
             raise ValueError(f"Alert has invalid FunnelsAlertConfig: {config}")
-        if parsed_funnel_config.metric == "conversion_from_previous" and parsed_funnel_config.funnel_step == 0:
+        step = parsed_funnel_config.funnel_step
+        if step is not None and step < 0:
+            raise ValueError(f"funnel_step must be >= 0, got {step}")
+        if parsed_funnel_config.metric == FunnelConversionMetric.CONVERSION_FROM_PREVIOUS and step == 0:
             raise ValueError(
                 "conversion_from_previous is undefined at the first step; use conversion_from_start instead"
             )
