@@ -3,6 +3,7 @@ import { AI_EVENT_TYPES } from '../ai'
 import { AI_EVENTS_OUTPUT, AiEventOutput, EventOutput } from '../analytics/outputs'
 import { ok } from '../pipelines/results'
 import { ProcessingStep } from '../pipelines/steps'
+import { parseTeamsList } from '../utils/parse-teams-list'
 import { EventToEmit } from './emit-event-step'
 
 const LARGE_AI_PROPERTIES = new Set([
@@ -85,15 +86,7 @@ function maybeStripAiProperties(
     ]
 }
 
-export function parseTeamsList(teamsStr: string): number[] | '*' {
-    if (teamsStr === '*') {
-        return '*'
-    }
-    return teamsStr
-        .split(',')
-        .map((s) => parseInt(s.trim(), 10))
-        .filter((n) => !isNaN(n))
-}
+export { parseTeamsList }
 
 function clampPercentage(pct: number): number {
     if (Number.isNaN(pct) || pct <= 0) {
