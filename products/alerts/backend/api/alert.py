@@ -3,9 +3,7 @@ import dataclasses
 from typing import Optional
 from zoneinfo import ZoneInfo
 
-from django.contrib.postgres.search import TrigramSimilarity, TrigramWordSimilarity
-from django.db.models import F, OuterRef, Q, QuerySet, Subquery, Value
-from django.db.models.functions import Coalesce
+from django.db.models import OuterRef, QuerySet, Subquery
 from django.db.models.signals import pre_delete
 from django.dispatch import receiver
 
@@ -27,9 +25,9 @@ from posthog.schema import (
 from posthog.api.documentation import extend_schema_field
 from posthog.api.routing import TeamAndOrgViewSetMixin
 from posthog.api.scoped_related_fields import TeamScopedPrimaryKeyRelatedField
-from posthog.api.shared import UserBasicSerializer
+from posthog.api.shared import SearchMatchTypeSerializerMixin, UserBasicSerializer
 from posthog.event_usage import get_request_analytics_properties
-from posthog.helpers.trigram_search import MAX_SEARCH_LENGTH, MIN_NAME_TRIGRAM_SIMILARITY, normalize_search_term
+from posthog.helpers.trigram_search import MAX_SEARCH_LENGTH, NAME_FIELD, apply_trigram_search
 from posthog.models import User
 from posthog.models.activity_logging.activity_log import ActivityContextBase, Detail, changes_between, log_activity
 from posthog.models.signals import model_activity_signal, mutable_receiver
@@ -186,7 +184,7 @@ class RelativeDateTimeField(serializers.DateTimeField):
         return data
 
 
-class AlertSerializer(serializers.ModelSerializer):
+class AlertSerializer(SearchMatchTypeSerializerMixin, serializers.ModelSerializer):
     created_by = UserBasicSerializer(read_only=True)
     checks = AlertCheckSerializer(
         many=True,
@@ -307,6 +305,7 @@ class AlertSerializer(serializers.ModelSerializer):
             "investigation_agent_enabled",
             "investigation_gates_notifications",
             "investigation_inconclusive_action",
+            "search_match_type",
         ]
         read_only_fields = [
             "id",
@@ -788,22 +787,12 @@ class AlertViewSet(TeamAndOrgViewSetMixin, viewsets.ModelViewSet):
 
     @staticmethod
     def _apply_search(queryset: QuerySet, search: str) -> QuerySet:
-        search = normalize_search_term(search)
-        if not search:
-            return queryset
-
-        zero = Value(0.0)
-        name_word_score = Coalesce(TrigramWordSimilarity(search, "name"), zero)
-        name_full_score = Coalesce(TrigramSimilarity("name", search), zero)
-
-        return (
-            queryset.annotate(
-                _name_word=name_word_score,
-                _name_full=name_full_score,
-            )
-            .filter(Q(_name_word__gt=MIN_NAME_TRIGRAM_SIMILARITY) | Q(_name_full__gt=MIN_NAME_TRIGRAM_SIMILARITY))
-            .annotate(_search_score=F("_name_word") + F("_name_full"))
-            .order_by("-_search_score", "-created_at")
+        return apply_trigram_search(
+            queryset,
+            search,
+            span_prefix="alert.search",
+            fields=(NAME_FIELD,),
+            tiebreakers=("-created_at",),
         )
 
     CHECKS_DEFAULT_LIMIT = 5
