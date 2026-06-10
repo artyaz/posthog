@@ -14,6 +14,7 @@ from posthog.schema import (
     AlertConditionType,
     AlertState,
     ChartDisplayType,
+    FunnelsAlertConfig,
     HogQLAlertConfig,
     HogQLAlertEvaluation,
     InsightThreshold,
@@ -147,6 +148,26 @@ def validate_alert_config(
         ):
             # Rows are entities in any_row mode, not a time axis — relative change is meaningless.
             raise ValueError("Any-row SQL alerts only support absolute value conditions")
+        _validate_condition_threshold_compatibility(parsed_condition, threshold_config)
+        if require_threshold_bounds and detector_config is None:
+            validate_threshold_bounds_required(threshold_config)
+        return
+
+    if config_type == "FunnelsAlertConfig":
+        # A funnel STEPS result is a single snapshot, so funnel alerts are absolute-only in v1
+        # (relative change needs a prior window — a deliberate fast-follow).
+        if kind != NodeKind.FUNNELS_QUERY:
+            raise ValueError(f"Funnel alert config requires a FunnelsQuery insight, got '{kind}'")
+        if parsed_condition.type != AlertConditionType.ABSOLUTE_VALUE:
+            raise ValueError("Funnel alerts only support absolute value conditions")
+        try:
+            parsed_funnel_config = FunnelsAlertConfig.model_validate(config)
+        except Exception:
+            raise ValueError(f"Alert has invalid FunnelsAlertConfig: {config}")
+        if parsed_funnel_config.metric == "conversion_from_previous" and parsed_funnel_config.funnel_step == 0:
+            raise ValueError(
+                "conversion_from_previous is undefined at the first step; use conversion_from_start instead"
+            )
         _validate_condition_threshold_compatibility(parsed_condition, threshold_config)
         if require_threshold_bounds and detector_config is None:
             validate_threshold_bounds_required(threshold_config)

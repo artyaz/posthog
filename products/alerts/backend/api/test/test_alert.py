@@ -93,6 +93,40 @@ class TestAlert(APIBaseTest, QueryMatchingTest):
         alerts = self.client.get(f"/api/projects/{self.team.id}/alerts")
         assert len(alerts.json()["results"]) == 0
 
+    def test_create_alert_on_funnel_insight_is_flag_gated(self) -> None:
+        funnel_insight = self.client.post(
+            f"/api/projects/{self.team.id}/insights",
+            data={
+                "query": {
+                    "kind": "FunnelsQuery",
+                    "series": [
+                        {"kind": "EventsNode", "event": "$pageview"},
+                        {"kind": "EventsNode", "event": "$autocapture"},
+                    ],
+                }
+            },
+        ).json()
+        creation_request = {
+            "insight": funnel_insight["id"],
+            "subscribed_users": [self.user.id],
+            "condition": {"type": AlertConditionType.ABSOLUTE_VALUE},
+            "config": {"type": "FunnelsAlertConfig", "metric": "conversion_from_start", "funnel_step": None},
+            "name": "funnel alert",
+            "threshold": {"configuration": {"type": InsightThresholdType.ABSOLUTE, "bounds": {"upper": 50}}},
+            "calculation_interval": "daily",
+        }
+
+        # Flag off: the insight gate rejects funnel alerts.
+        with mock.patch("products.alerts.backend.api.alert.posthoganalytics.feature_enabled", return_value=False):
+            response = self.client.post(f"/api/projects/{self.team.id}/alerts", creation_request)
+        assert response.status_code == status.HTTP_400_BAD_REQUEST, response.content
+        assert "Funnel insight alerts are not enabled" in str(response.content)
+
+        # Flag on: the same request is accepted.
+        with mock.patch("products.alerts.backend.api.alert.posthoganalytics.feature_enabled", return_value=True):
+            response = self.client.post(f"/api/projects/{self.team.id}/alerts", creation_request)
+        assert response.status_code == status.HTTP_201_CREATED, response.content
+
     def test_create_threshold_alert_rejects_empty_bounds(self) -> None:
         creation_request = {
             "insight": self.insight["id"],
