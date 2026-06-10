@@ -59,7 +59,7 @@ export function createProcessPersonlessStep<TInput extends ProcessPersonlessInpu
     personsStore: PersonsStore,
     flagCalledPersonlessDefaultTeams: string = '*'
 ): ProcessingStep<TInput, TInput & ProcessPersonlessOutput> {
-    const flagCalledDefaultEnabledForTeam = buildIntegerMatcher(flagCalledPersonlessDefaultTeams, true)
+    const flagCalledDefaultEnabledForTeam = buildIntegerMatcher(flagCalledPersonlessDefaultTeams.trim(), true)
 
     return async function processPersonlessStep(
         input: TInput
