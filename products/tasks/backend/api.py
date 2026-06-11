@@ -3081,7 +3081,8 @@ class SandboxEnvironmentViewSet(TeamAndOrgViewSetMixin, viewsets.ModelViewSet):
         "Internal endpoint called by the standalone Node agent-proxy after accepting an ingest event "
         "that requires a Django-side side effect. Dispatches a Temporal heartbeat signal or an "
         "awaiting-input mobile push notification depending on `kind`. "
-        "Authenticated with the forwarded sandbox event ingest JWT — no session or API key required. "
+        "Authenticated with the forwarded sandbox event ingest JWT plus the X-Agent-Proxy-Secret "
+        "shared secret (required outside local dev/test) — no session or API key involved. "
         "Best-effort: always returns 200 when auth passes; side-effect failures are logged, not surfaced."
     ),
 )
@@ -3113,13 +3114,17 @@ def agent_proxy_callback(request, run_id: str) -> JsonResponse:
         return JsonResponse({"error": "Token does not match task run"}, status=403)
 
     # Service-to-service guard: the event-ingest JWT is also held by the sandbox, so the JWT alone
-    # does not prove the caller is the agent-proxy. When a shared secret is configured, require it so
-    # a sandbox cannot drive this callback directly (bypassing the proxy's Redis sequencing/throttle).
+    # does not prove the caller is the agent-proxy. Require the shared secret so a sandbox cannot
+    # drive this callback directly (bypassing the proxy's Redis sequencing/throttle). An unset
+    # secret fails closed — the endpoint stays dead until the secret is provisioned — except in
+    # local dev/test where no proxy deployment exists to share a secret with.
     expected_secret = settings.AGENT_PROXY_CALLBACK_SECRET
     if expected_secret:
         provided_secret = request.headers.get("X-Agent-Proxy-Secret", "")
         if not hmac.compare_digest(provided_secret, expected_secret):
             return JsonResponse({"error": "Invalid agent-proxy callback secret"}, status=403)
+    elif not (settings.DEBUG or settings.TEST):
+        return JsonResponse({"error": "Agent-proxy callback secret is not configured"}, status=403)
 
     # Validate and parse the request body
     try:

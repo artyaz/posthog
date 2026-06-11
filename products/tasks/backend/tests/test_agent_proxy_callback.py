@@ -73,6 +73,20 @@ class TestAgentProxyCallback(TransactionTestCase):
         # Correct secret passes the gate and reaches body handling (empty body is a 400, not a 403).
         self.assertEqual(self._post({}, token=self._token(), secret="proxy-only-secret").status_code, 400)
 
+    @override_settings(AGENT_PROXY_CALLBACK_SECRET=None, DEBUG=False, TEST=False)
+    def test_callback_fails_closed_when_secret_unset_outside_dev(self) -> None:
+        # Production with no secret provisioned: the endpoint refuses even a valid ingest JWT
+        # rather than letting sandboxes drive side effects directly.
+        response = self._post(self._body(), token=self._token())
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"], "Agent-proxy callback secret is not configured")
+
+    @override_settings(AGENT_PROXY_CALLBACK_SECRET=None)
+    def test_callback_allows_unset_secret_in_test_mode(self) -> None:
+        # Local dev/test has no proxy deployment to share a secret with; the gate stays open so
+        # the callback remains exercisable (empty body reaches handling: 400, not 403).
+        self.assertEqual(self._post({}, token=self._token()).status_code, 400)
+
     def test_missing_authorization_returns_401(self) -> None:
         response = self.client.post(self._url(), data=json.dumps(self._body()), content_type="application/json")
         self.assertEqual(response.status_code, 401)
