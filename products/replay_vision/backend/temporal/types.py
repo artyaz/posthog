@@ -209,13 +209,14 @@ class CleanupGeminiFileInputs(BaseModel, frozen=True):
     gemini_file_name: str
 
 
-class EmbedSummarizerObservationInputs(BaseModel, frozen=True):
-    """Input to the summarizer-side-effect activity that emits per-facet embedding requests."""
+class EmbedObservationInputs(BaseModel, frozen=True):
+    """Input to the side-effect activity that emits embedding requests for an observation's reasoning/summary."""
 
     team_id: int
     session_id: str
     observation_id: UUID
-    summarizer_output: SummarizerOutput
+    scanner_id: UUID
+    model_output: AnyScannerOutput
 
 
 class EmitClassifierTagsInputs(BaseModel, frozen=True):
