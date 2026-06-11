@@ -1,6 +1,9 @@
 import { expectLogic } from 'kea-test-utils'
 import { ReadableStream as NodeReadableStream } from 'stream/web'
 
+import { FEATURE_FLAGS } from 'lib/constants'
+import { featureFlagLogic } from 'lib/logic/featureFlagLogic'
+
 import { initKeaTests } from '~/test/init'
 
 import { OriginProduct, Task, TaskRun, TaskRunEnvironment, TaskRunStatus } from '../types'
@@ -123,6 +126,10 @@ function createFetchMock({
         const runsListMatch = url.match(/\/tasks\/([^/]+)\/runs\/$/)
         const taskMatch = url.match(/\/tasks\/([^/]+)\/$/)
 
+        if (url.includes('/_preflight')) {
+            // Keep is_debug unset so streamViaProxyEnabled is driven purely by the feature flag.
+            return Promise.resolve(createJsonResponse({}))
+        }
         if (streamTokenMatch) {
             return Promise.resolve(createJsonResponse({ token: 'proxy-test-token', stream_base_url: streamBaseUrl }))
         }
@@ -164,6 +171,14 @@ describe('taskDetailSceneLogic', () => {
     const originalFetch = global.fetch
 
     beforeEach(() => {
+        // featureFlagLogic persists flags to localStorage and hydrates as soon as initKeaTests
+        // mounts the common logics, so clear before init or flags enabled in one test leak into
+        // the next.
+        window.localStorage.clear()
+        // preflightLogic prefers the app context over fetching, and the default test fixture has
+        // is_debug: true, which would force streamViaProxyEnabled on. Pin it to false so the
+        // feature flag alone drives the rollout-gated behavior in these tests.
+        window.POSTHOG_APP_CONTEXT = { preflight: { is_debug: false } } as unknown as typeof window.POSTHOG_APP_CONTEXT
         initKeaTests()
         global.fetch = createFetchMock()
     })
@@ -285,6 +300,16 @@ describe('taskDetailSceneLogic', () => {
         const streamFetchCalls = (): [RequestInfo | URL, RequestInit | undefined][] =>
             (global.fetch as jest.Mock).mock.calls.filter(([url]) => /\/runs\/[^/]+\/stream\/?(\?|$)/.test(String(url)))
 
+        const streamTokenFetchCalls = (): [RequestInfo | URL, RequestInit | undefined][] =>
+            (global.fetch as jest.Mock).mock.calls.filter(([url]) => String(url).includes('/stream_token/'))
+
+        // The durable-streaming rollout flag gates stream_token resolution and status-unaware
+        // streams; tests covering the new behavior opt in explicitly, the rest run with it off.
+        const enableProxyStreaming = (): void =>
+            featureFlagLogic.actions.setFeatureFlags([FEATURE_FLAGS.TASKS_STREAM_VIA_PROXY], {
+                [FEATURE_FLAGS.TASKS_STREAM_VIA_PROXY]: true,
+            })
+
         beforeEach(() => {
             window.sessionStorage.clear()
         })
@@ -386,6 +411,7 @@ describe('taskDetailSceneLogic', () => {
 
             const logic = taskDetailSceneLogic({ taskId: 'task-123' })
             logic.mount()
+            enableProxyStreaming()
             await expectLogic(logic).toFinishAllListeners()
 
             logic.actions.setSelectedRunId(run.id, 'task-123')
@@ -398,6 +424,51 @@ describe('taskDetailSceneLogic', () => {
             expect(logic.values.streamEntries.map((entry) => entry.message)).toEqual(['hello'])
             expect(streamFetchCalls()).toHaveLength(1)
             expect(window.sessionStorage.getItem('tasks:stream-resume:run-1')).toBeNull()
+
+            logic.unmount()
+        })
+
+        it('keeps the pre-proxy behavior with the flag off: terminal runs never stream or fetch a stream token', async () => {
+            const run = createMockRun('run-1', TaskRunStatus.COMPLETED)
+            global.fetch = createFetchMock({ runs: { [run.id]: run } })
+
+            const logic = taskDetailSceneLogic({ taskId: 'task-123' })
+            logic.mount()
+            await expectLogic(logic).toFinishAllListeners()
+
+            logic.actions.setSelectedRunId(run.id, 'task-123')
+            await expectLogic(logic).toFinishAllListeners()
+            await flushStreaming()
+
+            expect(logic.values.isStreaming).toBe(false)
+            expect(streamFetchCalls()).toHaveLength(0)
+            expect(streamTokenFetchCalls()).toHaveLength(0)
+
+            logic.unmount()
+        })
+
+        it('streams live runs with the flag off via the Django path without fetching a stream token', async () => {
+            const run = createMockRun('run-1', TaskRunStatus.IN_PROGRESS)
+            global.fetch = createFetchMock({
+                runs: { [run.id]: run },
+                streamResponses: [
+                    createSseResponse(['id: 1-0\nevent: message\ndata: {"type":"user","content":"hello"}\n\n'], true),
+                ],
+            })
+
+            const logic = taskDetailSceneLogic({ taskId: 'task-123' })
+            logic.mount()
+            await expectLogic(logic).toFinishAllListeners()
+
+            logic.actions.setSelectedRunId(run.id, 'task-123')
+            await expectLogic(logic).toFinishAllListeners()
+            await flushStreaming()
+
+            const calls = streamFetchCalls()
+            expect(calls).toHaveLength(1)
+            expect(String(calls[0][0])).toContain('/api/projects/@current/tasks/task-123/runs/run-1/stream/')
+            expect(streamTokenFetchCalls()).toHaveLength(0)
+            expect(logic.values.streamEntries.map((entry) => entry.message)).toEqual(['hello'])
 
             logic.unmount()
         })
@@ -444,6 +515,7 @@ describe('taskDetailSceneLogic', () => {
 
             const logic = taskDetailSceneLogic({ taskId: 'task-123' })
             logic.mount()
+            enableProxyStreaming()
             await expectLogic(logic).toFinishAllListeners()
 
             logic.actions.setSelectedRunId(run.id, 'task-123')

@@ -16,7 +16,10 @@ import { loaders } from 'kea-loaders'
 import { actionToUrl, router, urlToAction } from 'kea-router'
 
 import api, { type EventSourceMessage } from 'lib/api'
+import { FEATURE_FLAGS } from 'lib/constants'
+import { featureFlagLogic } from 'lib/logic/featureFlagLogic'
 import { isUUIDLike } from 'lib/utils'
+import { preflightLogic } from 'scenes/PreflightCheck/preflightLogic'
 import { teamLogic } from 'scenes/teamLogic'
 import { urls } from 'scenes/urls'
 
@@ -82,11 +85,16 @@ interface StreamTarget {
     headers: Record<string, string>
 }
 
-// Route the live stream through the standalone agent-proxy when the server resolves a base URL for it;
-// otherwise hit the Django endpoint directly. The proxy is purely additive: if the token call fails
-// (or the server returns no base URL), we fall back to the Django path, so streaming never breaks.
-async function resolveStreamTarget(taskId: string, runId: string): Promise<StreamTarget> {
+// Route the live stream through the standalone agent-proxy when the rollout flag is on AND the
+// server resolves a base URL for it; otherwise hit the Django endpoint directly. The proxy is
+// purely additive: if the token call fails (or the server returns no base URL), we fall back to
+// the Django path, so streaming never breaks. With the flag off the token call is skipped
+// entirely, keeping the pre-proxy request pattern unchanged.
+async function resolveStreamTarget(taskId: string, runId: string, viaProxy: boolean): Promise<StreamTarget> {
     const djangoPath = `/api/projects/@current/tasks/${taskId}/runs/${runId}/stream/`
+    if (!viaProxy) {
+        return { url: djangoPath, headers: {} }
+    }
     try {
         const { token, stream_base_url } = await tasksRunsStreamTokenRetrieve('@current', taskId, runId)
         if (!stream_base_url) {
@@ -108,7 +116,16 @@ export const taskDetailSceneLogic = kea<taskDetailSceneLogicType>([
     key((props) => props.taskId),
 
     connect((props: TaskDetailSceneLogicProps) => ({
-        values: [taskLogic(props), ['task', 'taskLoading'], teamLogic, ['currentProjectId']],
+        values: [
+            taskLogic(props),
+            ['task', 'taskLoading'],
+            teamLogic,
+            ['currentProjectId'],
+            featureFlagLogic,
+            ['featureFlags'],
+            preflightLogic,
+            ['preflight'],
+        ],
         actions: [
             taskLogic(props),
             ['loadTask', 'loadTaskSuccess', 'runTask', 'runTaskSuccess', 'deleteTask', 'updateTask'],
@@ -332,6 +349,14 @@ export const taskDetailSceneLogic = kea<taskDetailSceneLogicType>([
                 return selectedRun.status === TaskRunStatus.QUEUED || selectedRun.status === TaskRunStatus.IN_PROGRESS
             },
         ],
+        streamViaProxyEnabled: [
+            (s) => [s.featureFlags, s.preflight],
+            (featureFlags, preflight): boolean =>
+                // Gates the durable-streaming rollout (stream_token + status-unaware streams). Local
+                // dev disables the analytics SDK, so DEBUG instances opt in unconditionally — the
+                // server still owns the final proxy-vs-Django decision via stream_token.
+                !!featureFlags[FEATURE_FLAGS.TASKS_STREAM_VIA_PROXY] || !!preflight?.is_debug,
+        ],
         title: [
             (s) => [s.task],
             (task): string => {
@@ -394,13 +419,27 @@ export const taskDetailSceneLogic = kea<taskDetailSceneLogicType>([
                 return
             }
             if (values.streamingFailed) {
-                // Reconnects were exhausted earlier; fall back to polling regardless of status.
-                actions.startPolling()
+                // Reconnects were exhausted earlier; fall back to polling while the run is live,
+                // and stop once it reaches a terminal status so the page doesn't poll forever.
+                if (values.shouldPoll) {
+                    actions.startPolling()
+                } else {
+                    actions.stopPolling()
+                }
             } else if (!values.isStreaming) {
-                // The durable stream is status-unaware: open it regardless of the run's current
-                // status and rely on the in-band stream-end sentinel to finish. Terminal runs
-                // replay their buffered events plus the sentinel; live runs stream as they go.
-                actions.startStreaming()
+                if (values.streamViaProxyEnabled) {
+                    // The durable stream is status-unaware: open it regardless of the run's current
+                    // status and rely on the in-band stream-end sentinel to finish. Terminal runs
+                    // replay their buffered events plus the sentinel; live runs stream as they go.
+                    actions.startStreaming()
+                } else if (values.shouldPoll) {
+                    actions.startStreaming()
+                } else {
+                    // Rollout flag off: keep the pre-proxy behavior — terminal runs never open a
+                    // stream connection.
+                    actions.stopPolling()
+                    actions.stopStreaming()
+                }
             }
         },
         loadTaskSuccess: ({ task }) => {
@@ -459,7 +498,7 @@ export const taskDetailSceneLogic = kea<taskDetailSceneLogicType>([
                     // Resolve the stream target (agent-proxy when enabled, else Django) and seed the
                     // first connection from the persisted resume point; fetch-event-source manages
                     // Last-Event-ID across its own reconnects after that.
-                    const target = await resolveStreamTarget(props.taskId, runId)
+                    const target = await resolveStreamTarget(props.taskId, runId, values.streamViaProxyEnabled)
                     const resumeId = values.lastStreamEventId ?? readStreamResumeId(runId)
                     try {
                         await api.stream(target.url, {

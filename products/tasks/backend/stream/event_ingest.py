@@ -6,10 +6,14 @@ from collections.abc import AsyncGenerator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import cast
 
+from django.conf import settings
+
 import structlog
+import posthoganalytics
 from asgiref.sync import sync_to_async
 from jwt import PyJWTError
 
+from products.tasks.backend.constants import STREAM_VIA_PROXY_FEATURE_FLAG
 from products.tasks.backend.models import TaskRun
 from products.tasks.backend.push_dispatcher import notify_task_run_awaiting_input
 from products.tasks.backend.services.connection_token import (
@@ -308,7 +312,7 @@ async def _dispatch_awaiting_input_if_interactive(run_id: str) -> None:
 
 def _dispatch_awaiting_input_if_interactive_sync(run_id: str) -> None:
     try:
-        task_run = TaskRun.objects.select_related("task").get(id=run_id)
+        task_run = TaskRun.objects.select_related("task__created_by", "team").get(id=run_id)
     except TaskRun.DoesNotExist:
         logger.warning("task_run_event_ingest_awaiting_input_run_missing", run_id=run_id)
         return
@@ -316,7 +320,36 @@ def _dispatch_awaiting_input_if_interactive_sync(run_id: str) -> None:
     if task_run.mode != "interactive":
         return
 
+    if not _awaiting_input_push_enabled(task_run):
+        return
+
     notify_task_run_awaiting_input(task_run)
+
+
+def _awaiting_input_push_enabled(task_run: TaskRun) -> bool:
+    """Awaiting-input pushes ship with the proxy-streaming rollout: gate them on the same flag
+    so deploying this code changes nothing until the rollout starts. Local dev disables the
+    analytics SDK, so the flag never evaluates there; DEBUG is the opt-in, mirroring the
+    stream_token endpoint. Fails closed on flag-evaluation errors."""
+    if settings.DEBUG:
+        return True
+    user = task_run.task.created_by
+    if user is None:
+        return False
+    organization_id = str(task_run.team.organization_id)
+    try:
+        return bool(
+            posthoganalytics.feature_enabled(
+                STREAM_VIA_PROXY_FEATURE_FLAG,
+                user.distinct_id or f"user_{user.id}",
+                groups={"organization": organization_id},
+                group_properties={"organization": {"id": organization_id}},
+                only_evaluate_locally=False,
+                send_feature_flag_events=False,
+            )
+        )
+    except Exception:
+        return False
 
 
 def _is_session_update(event: dict) -> bool:
