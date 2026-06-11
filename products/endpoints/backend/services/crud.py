@@ -201,6 +201,9 @@ class EndpointCrudService:
             endpoint.save()
             if not version_targeted and not endpoint.is_active and was_materialized:
                 self.materialization.disable_materialization(endpoint, current_version)
+            if data.is_active is not None and not version_targeted:
+                # Activation affects throttle classification — force a lazy re-check.
+                clear_endpoint_materialization_cache(self.team.pk, endpoint.name)
 
             step = "versioning"
             target_version, version_was_created, old_bucket_overrides = self._apply_query_change(
@@ -284,6 +287,8 @@ class EndpointCrudService:
         # Preserve bucketing across the version bump so materialization transfers cleanly.
         old_bucket_overrides = target_version.bucket_overrides if was_materialized else None
         new_version = endpoint.create_new_version(query=new_query_dict, user=self.user)
+        # The "current" version changed — its cached throttle readiness no longer applies.
+        clear_endpoint_materialization_cache(self.team.pk, endpoint.name)
         return new_version, True, old_bucket_overrides
 
     def _apply_version_field_updates(
@@ -483,8 +488,9 @@ class EndpointCrudService:
                 )
 
         endpoint.soft_delete()
-        # Single endpoint-level cache key covers all versions.
-        clear_endpoint_materialization_cache(self.team.pk, endpoint.name)
+        clear_endpoint_materialization_cache(
+            self.team.pk, endpoint.name, versions=endpoint.versions.values_list("version", flat=True)
+        )
         self._log_activity(
             item_id=endpoint_id,
             scope="Endpoint",

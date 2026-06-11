@@ -47,7 +47,7 @@ from posthog.clickhouse.client.limit import ConcurrencyLimitExceeded
 from posthog.clickhouse.query_tagging import Feature, Product, get_query_tag_value, tag_queries
 from posthog.ducklake.common import get_duckgres_server_for_organization
 from posthog.errors import ExposedCHQueryError
-from posthog.event_usage import get_request_analytics_properties, report_user_action
+from posthog.event_usage import get_request_analytics_properties, report_user_or_team_action
 from posthog.exceptions_capture import capture_exception
 from posthog.models import Team, User
 
@@ -361,22 +361,23 @@ class EndpointExecutionService(PydanticModelMixin):
 
         self.validate_run_request(data, endpoint, version_obj, offset=offset)
 
-        if self.user is not None:
-            report_user_action(
-                user=self.user,
-                event="endpoint executed",
-                properties={
-                    "endpoint_id": str(endpoint.id),
-                    "endpoint_name": endpoint.name,
-                    "has_filters_override": bool(data.filters_override),
-                    "has_variables": bool(data.variables),
-                    "has_limit": data.limit is not None,
-                    "has_offset": data.offset is not None,
-                    "refresh_mode": data.refresh.value if data.refresh else None,
-                },
-                team=self.team,
-                request=self.request,
-            )
+        # Falls back to the team as the actor for user-less principals (project secret API keys).
+        report_user_or_team_action(
+            "endpoint executed",
+            {
+                "endpoint_id": str(endpoint.id),
+                "endpoint_name": endpoint.name,
+                "has_filters_override": bool(data.filters_override),
+                "has_variables": bool(data.variables),
+                "has_limit": data.limit is not None,
+                "has_offset": data.offset is not None,
+                "refresh_mode": data.refresh.value if data.refresh else None,
+            },
+            user=self.user,
+            team=self.team,
+            organization=self.team.organization,
+            analytics_props=get_request_analytics_properties(self.request),
+        )
 
         # Check if we should use materialization for this version
         use_materialized = self.should_use_materialized_table(endpoint, data, version_obj)
@@ -805,7 +806,11 @@ class EndpointExecutionService(PydanticModelMixin):
 
     def _is_interactive_session(self) -> bool:
         """Whether this request came from the PostHog UI (session auth) rather than a
-        programmatic credential (personal API key, OAuth, project secret API key, ...)."""
+        programmatic credential (personal API key, OAuth, project secret API key, ...).
+
+        Same idiom as get_event_source (posthog/event_usage.py) minus its session-cookie
+        fallback, which could misclassify API-key requests sent from a logged-in browser.
+        """
         return isinstance(getattr(self.request, "successful_authenticator", None), SessionAuthentication)
 
     def _execute_query_and_respond(

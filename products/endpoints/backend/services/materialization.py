@@ -274,10 +274,9 @@ class EndpointMaterializationService:
                     context=EndpointContext(version=version.version),
                 ),
             )
-        # The throttle cache is endpoint-level (one key per team+name, reflecting the
-        # current version) — clearing it forces a lazy re-check from the DB, which is
-        # correct even when a non-current version was disabled.
-        clear_endpoint_materialization_cache(self.team.pk, endpoint.name)
+        # Clears this version's throttle-readiness key plus the "current" key (the disabled
+        # version may be the current one) — the next request lazily re-checks the DB.
+        clear_endpoint_materialization_cache(self.team.pk, endpoint.name, versions=[version.version])
 
     def preview(
         self,
