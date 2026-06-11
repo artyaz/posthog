@@ -573,7 +573,7 @@ class PostgresSource(SQLSource[PostgresSourceConfig], SSHTunnelMixin, ValidateDa
         )
         # `SourceResponse.name` must match `DataWarehouseTable.url_pattern` (both derived from the
         # storage key when present, otherwise the row name) so HogQL reads from where we wrote.
-        storage_key = (schema.sync_type_config or {}).get("dwh_storage_key")
+        storage_key = schema.s3_folder_path or (schema.sync_type_config or {}).get("dwh_storage_key")
         storage_schema_name = storage_key if isinstance(storage_key, str) and storage_key else inputs.schema_name
         response.name = NamingConvention.normalize_identifier(storage_schema_name)
         return response

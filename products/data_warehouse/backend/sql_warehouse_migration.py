@@ -1,6 +1,6 @@
 """Migrate pre-multi-schema SQL warehouse rows to qualified naming without re-syncing.
 
-Legacy rows are renamed in place (`users` → `public.users`) and tagged `dwh_storage_key=<original>`
+Legacy rows are renamed in place (`users` → `public.users`) and tagged `s3_folder_path=<original>`
 so sync keeps reading/writing the legacy Delta path. Source-agnostic — gated only by the namespace
 field being blank-able; Postgres direct-query plumbing stays in `postgres_warehouse_migration.py`.
 """
@@ -56,7 +56,7 @@ def _qualify_legacy_row(
     target_source_table_name: str | None = None,
     duplicate_to_drop: Any | None = None,
 ) -> str | None:
-    """Rename `row` to qualified form, stash `dwh_storage_key`, optionally drop a duplicate.
+    """Rename `row` to qualified form, stash `s3_folder_path`, optionally drop a duplicate.
     Returns the new name, or None if a duplicate with its own data blocked the rename.
     """
     sync_type_config = row.sync_type_config or {}
@@ -81,12 +81,19 @@ def _qualify_legacy_row(
     merged_metadata.setdefault("foreign_keys", [])
 
     new_sync_type_config: dict[str, Any] = {**sync_type_config, "schema_metadata": merged_metadata}
-    if "dwh_storage_key" not in sync_type_config:
-        new_sync_type_config["dwh_storage_key"] = row.name
+    # `s3_folder_path` is the source of truth; the JSON key is written transitionally so workers
+    # still on the old code keep reading the legacy path during rollout.
+    storage_key = sync_type_config.get("dwh_storage_key") or row.s3_folder_path or row.name
+    new_sync_type_config["dwh_storage_key"] = storage_key
+
+    update_fields = ["name", "sync_type_config", "updated_at"]
+    if not row.s3_folder_path:
+        row.s3_folder_path = storage_key
+        update_fields.append("s3_folder_path")
 
     row.name = qualified_name
     row.sync_type_config = new_sync_type_config
-    row.save(update_fields=["name", "sync_type_config", "updated_at"])
+    row.save(update_fields=update_fields)
     return qualified_name
 
 

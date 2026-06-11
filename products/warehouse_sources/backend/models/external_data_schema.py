@@ -59,6 +59,10 @@ class ExternalDataSchema(ModelActivityMixin, CreatedMetaFields, UpdatedMetaField
         default=dict,
         blank=True,
     )
+    # Leaf subdir under the source's S3 folder that Delta data is written to. Pins legacy rows
+    # (renamed to qualified form during multi-schema migration) to their original path. Empty for
+    # new rows — readers fall back to the normalized schema `name`.
+    s3_folder_path = models.CharField(max_length=400, null=True, blank=True)
     # Deprecated in favour of `sync_frequency_interval`
     sync_frequency = deprecate_field(
         models.CharField(max_length=128, choices=SyncFrequency, default=SyncFrequency.DAILY, blank=True)
@@ -229,12 +233,6 @@ class ExternalDataSchema(ModelActivityMixin, CreatedMetaFields, UpdatedMetaField
             metadata = self.sync_type_config.get("schema_metadata")
             if isinstance(metadata, dict):
                 return metadata
-        return None
-
-    @property
-    def dwh_storage_key(self) -> str | None:
-        if self.sync_type_config:
-            return self.sync_type_config.get("dwh_storage_key")
         return None
 
     @property
