@@ -5729,6 +5729,49 @@ class TestCohortUsedIn(ClickhouseTestMixin, APIBaseTest):
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK, response.json())
 
+    @patch("posthog.api.cohort.report_user_action")
+    @patch("posthog.tasks.calculate_cohort.calculate_cohort_ch.delay")
+    def test_deletion_protection_blocks_on_transitively_referencing_flag(self, patch_calculate_cohort, patch_capture):
+        response = self.client.post(
+            f"/api/projects/{self.team.id}/cohorts",
+            data={"name": "Cohort A", "groups": [{"properties": {"team_id": 5}}]},
+        )
+        cohort_a_id = response.json()["id"]
+
+        response = self.client.post(
+            f"/api/projects/{self.team.id}/cohorts",
+            data={
+                "name": "Cohort B",
+                "filters": {
+                    "properties": {
+                        "type": "OR",
+                        "values": [{"type": "OR", "values": [{"type": "cohort", "key": "id", "value": cohort_a_id}]}],
+                    }
+                },
+            },
+        )
+        cohort_b_id = response.json()["id"]
+
+        # The flag references only cohort B directly; deleting cohort A must still be blocked.
+        FeatureFlag.objects.create(
+            team=self.team,
+            filters={"groups": [{"properties": [{"key": "id", "value": cohort_b_id, "type": "cohort"}]}]},
+            name="Transitive Flag",
+            key="transitive-flag",
+            created_by=self.user,
+            active=True,
+        )
+
+        response = self.client.patch(
+            f"/api/projects/{self.team.id}/cohorts/{cohort_a_id}",
+            data={"deleted": True},
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn(
+            "This cohort is used in 1 active feature flag(s): Transitive Flag",
+            response.json()["detail"],
+        )
+
 
 class TestCalculateCohortCommand(APIBaseTest):
     def test_calculate_cohort_command_success(self):
