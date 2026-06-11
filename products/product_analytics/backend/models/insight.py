@@ -336,11 +336,11 @@ class Insight(RootTeamMixin, FileSystemSyncMixin, models.Model):
     def can_have_alerts(self) -> bool:
         """The insight's query kind can carry alerts at all.
 
-        Broader than ``are_alerts_supported`` (trends only, the unflagged path): SQL-backed alerts
-        are gated by a feature flag at creation time, but once created they must keep displaying
-        and must survive insight updates regardless of the flag.
+        Broader than ``are_alerts_supported`` (trends only, the unflagged path): SQL- and
+        funnel-backed alerts are gated by feature flags at creation time, but once created they
+        must keep displaying and must survive insight updates regardless of the flags.
         """
-        return self._unwrapped_query_kind() in (NodeKind.TRENDS_QUERY, NodeKind.HOG_QL_QUERY)
+        return self._unwrapped_query_kind() in (NodeKind.TRENDS_QUERY, NodeKind.HOG_QL_QUERY, NodeKind.FUNNELS_QUERY)
 
     @property
     def is_hogql_backed(self) -> bool:
