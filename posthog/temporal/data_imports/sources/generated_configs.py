@@ -195,7 +195,7 @@ class AshbySourceConfig(config.Config):
 
 @config.config
 class AttentiveSourceConfig(config.Config):
-    pass
+    api_key: str
 
 
 @config.config

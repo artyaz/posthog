@@ -48,6 +48,7 @@ the row lists both.
 | amplitude        | HTTP                        | requests                                                        | ✅                          |
 | asana            | HTTP                        | requests                                                        | ✅                          |
 | ashby            | HTTP                        | requests                                                        | ✅                          |
+| attentive        | HTTP (webhook-first)        | requests (webhook management)                                   | ✅                          |
 | attio            | HTTP                        | requests + `rest_source.RESTClient`                             | ✅                          |
 | bamboohr         | HTTP                        | requests                                                        | ✅                          |
 | bigquery         | HTTP + gRPC                 | google-cloud-bigquery + bigquery-storage                        | ✅ (HTTP + gRPC)            |
@@ -192,7 +193,6 @@ doesn't conflict with concurrent PRs.
 - apollo
 - apple_search_ads
 - appsflyer
-- attentive
 - auth0
 - azure_blob
 - azure_devops
