@@ -52,11 +52,14 @@ export function processPersonlessDistinctIdsBatchStep<T extends ProcessPersonles
             }
 
             if (cacheHits > 0) {
-                personlessDistinctIdCacheOperationsCounter.inc({ operation: 'hit' }, cacheHits)
+                personlessDistinctIdCacheOperationsCounter.inc({ operation: 'hit', source: 'batch' }, cacheHits)
             }
 
             if (personlessEntries.length > 0) {
-                personlessDistinctIdCacheOperationsCounter.inc({ operation: 'miss' }, personlessEntries.length)
+                personlessDistinctIdCacheOperationsCounter.inc(
+                    { operation: 'miss', source: 'batch' },
+                    personlessEntries.length
+                )
 
                 await personsStore.processPersonlessDistinctIdsBatch(personlessEntries)
 
