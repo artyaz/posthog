@@ -103,6 +103,7 @@ the row lists both.
 | okta             | HTTP                        | requests                                                        | ✅                          |
 | notion           | HTTP                        | requests                                                        | ✅                          |
 | omnisend         | HTTP                        | requests                                                        | ✅                          |
+| outbrain         | HTTP                        | requests                                                        | ✅                          |
 | paddle           | HTTP                        | requests                                                        | ✅                          |
 | pagerduty        | HTTP                        | requests                                                        | ✅                          |
 | pendo            | HTTP                        | requests                                                        | ✅                          |
@@ -267,7 +268,6 @@ doesn't conflict with concurrent PRs.
 - oracle_ebs
 - oracle_fusion
 - ortto
-- outbrain
 - outreach
 - pagerduty
 - pandadoc
