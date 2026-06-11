@@ -20,8 +20,8 @@ import { isDevEnv, isProdEnv } from '../utils/env-utils'
 import { DEFAULT_PRODUCER, type ProducerName } from './common/outputs'
 import type { DualWriteMode } from './outputs/types'
 
-/** Default for FLAG_CALLED_PERSONLESS_DEFAULT_TEAMS: '*' enables the personless default for all teams. */
-export const DEFAULT_FLAG_CALLED_PERSONLESS_DEFAULT_TEAMS = '*'
+/** Default for FLAG_CALLED_PERSONLESS_DEFAULT_TEAMS: '' disables the personless default so it is opt-in per team via config. */
+export const DEFAULT_FLAG_CALLED_PERSONLESS_DEFAULT_TEAMS = ''
 
 // =============================================================================
 // Infrastructure sub-config types

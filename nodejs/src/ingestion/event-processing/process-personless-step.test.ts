@@ -121,8 +121,12 @@ describe('createProcessPersonlessStep', () => {
         ...overrides,
     })
 
+    // Builds the step with the flag-called personless default enabled for all teams. The
+    // production default is '' (opt-in per team), so tests opt in explicitly here.
+    const buildStep = () => createProcessPersonlessStep(personsStore, '*')
+
     it('passes through when processPerson is true', async () => {
-        const step = createProcessPersonlessStep(personsStore)
+        const step = buildStep()
         const input = createInput({ processPerson: true })
 
         const result = await step(input)
@@ -147,7 +151,7 @@ describe('createProcessPersonlessStep', () => {
                 distinctId: pluginEvent.distinct_id,
             })
 
-            const step = createProcessPersonlessStep(personsStore)
+            const step = buildStep()
             const result = await step(createInput({ processPerson: true, normalizedEvent: flagCalledEvent() }))
 
             expect(result.type).toBe(PipelineResultType.OK)
@@ -160,7 +164,7 @@ describe('createProcessPersonlessStep', () => {
         it('keeps the event personful when it carries group keys', async () => {
             const fetchForCheckingSpy = jest.spyOn(personsStore, 'fetchForChecking')
 
-            const step = createProcessPersonlessStep(personsStore)
+            const step = buildStep()
             const result = await step(
                 createInput({
                     processPerson: true,
@@ -177,7 +181,7 @@ describe('createProcessPersonlessStep', () => {
         })
 
         it('still defaults to personless when $groups is empty', async () => {
-            const step = createProcessPersonlessStep(personsStore)
+            const step = buildStep()
             const result = await step(
                 createInput({ processPerson: true, normalizedEvent: flagCalledEvent({ $groups: {} }) })
             )
@@ -217,7 +221,7 @@ describe('createProcessPersonlessStep', () => {
         it('keeps the event personful when $process_person_profile was explicitly true', async () => {
             const fetchForCheckingSpy = jest.spyOn(personsStore, 'fetchForChecking')
 
-            const step = createProcessPersonlessStep(personsStore)
+            const step = buildStep()
             const result = await step(
                 createInput({
                     processPerson: true,
@@ -237,7 +241,7 @@ describe('createProcessPersonlessStep', () => {
         it('defaults to personless and records the distinct ID when no person exists', async () => {
             const addPersonlessDistinctIdSpy = jest.spyOn(personsStore, 'addPersonlessDistinctId')
 
-            const step = createProcessPersonlessStep(personsStore)
+            const step = buildStep()
             const result = await step(
                 createInput({
                     processPerson: true,
@@ -261,7 +265,7 @@ describe('createProcessPersonlessStep', () => {
             jest.spyOn(personsStore, 'getPersonlessBatchResult').mockReturnValue(false)
             const addPersonlessDistinctIdSpy = jest.spyOn(personsStore, 'addPersonlessDistinctId')
 
-            const step = createProcessPersonlessStep(personsStore)
+            const step = buildStep()
             const result = await step(createInput({ processPerson: true, normalizedEvent: flagCalledEvent() }))
 
             expect(result.type).toBe(PipelineResultType.OK)
@@ -281,7 +285,7 @@ describe('createProcessPersonlessStep', () => {
             jest.spyOn(personsStore, 'addPersonlessDistinctId').mockResolvedValue(true)
             const fetchForUpdateSpy = jest.spyOn(personsStore, 'fetchForUpdate').mockResolvedValue(person)
 
-            const step = createProcessPersonlessStep(personsStore)
+            const step = buildStep()
             const result = await step(createInput({ processPerson: true, normalizedEvent: flagCalledEvent() }))
 
             expect(result.type).toBe(PipelineResultType.OK)
@@ -297,7 +301,7 @@ describe('createProcessPersonlessStep', () => {
             jest.spyOn(personsStore, 'addPersonlessDistinctId').mockResolvedValue(true)
             jest.spyOn(personsStore, 'fetchForUpdate').mockResolvedValue(null)
 
-            const step = createProcessPersonlessStep(personsStore)
+            const step = buildStep()
             const result = await step(createInput({ processPerson: true, normalizedEvent: flagCalledEvent() }))
 
             expect(result.type).toBe(PipelineResultType.OK)
@@ -311,7 +315,7 @@ describe('createProcessPersonlessStep', () => {
             const fetchForCheckingSpy = jest.spyOn(personsStore, 'fetchForChecking')
             const addPersonlessDistinctIdSpy = jest.spyOn(personsStore, 'addPersonlessDistinctId')
 
-            const step = createProcessPersonlessStep(personsStore)
+            const step = buildStep()
             const result = await step(
                 createInput({ normalizedEvent: flagCalledEvent(), forceDisablePersonProcessing: true })
             )
@@ -347,7 +351,7 @@ describe('createProcessPersonlessStep', () => {
         }
 
         it('keeps an explicit-true event personful after normalization strips the property', async () => {
-            const personlessStep = createProcessPersonlessStep(personsStore)
+            const personlessStep = buildStep()
             const normalized = await runThroughNormalization(flagCalledEvent({ $process_person_profile: true }))
 
             // Normalization removes the explicit-true property for personful events, so the
@@ -364,7 +368,7 @@ describe('createProcessPersonlessStep', () => {
         })
 
         it('defaults an event without the property to personless through normalization', async () => {
-            const personlessStep = createProcessPersonlessStep(personsStore)
+            const personlessStep = buildStep()
             const normalized = await runThroughNormalization(flagCalledEvent())
 
             const result = await personlessStep(normalized)
@@ -380,7 +384,7 @@ describe('createProcessPersonlessStep', () => {
         it('skips the defaulting branch for explicit $process_person_profile=false events', async () => {
             const addPersonlessDistinctIdSpy = jest.spyOn(personsStore, 'addPersonlessDistinctId')
 
-            const personlessStep = createProcessPersonlessStep(personsStore)
+            const personlessStep = buildStep()
             const normalized = await runThroughNormalization(flagCalledEvent({ $process_person_profile: false }))
 
             const result = await personlessStep(normalized)
@@ -397,7 +401,7 @@ describe('createProcessPersonlessStep', () => {
 
     describe('basic personless functionality', () => {
         it('returns fake person when no existing person found', async () => {
-            const step = createProcessPersonlessStep(personsStore)
+            const step = buildStep()
             const result = await step(createInput())
 
             expect(result.type).toBe(PipelineResultType.OK)
@@ -418,7 +422,7 @@ describe('createProcessPersonlessStep', () => {
                 distinctId: pluginEvent.distinct_id,
             })
 
-            const step = createProcessPersonlessStep(personsStore)
+            const step = buildStep()
             const result = await step(createInput())
 
             expect(result.type).toBe(PipelineResultType.OK)
@@ -433,7 +437,7 @@ describe('createProcessPersonlessStep', () => {
         it('checks batch result for personless distinct ID when no person exists', async () => {
             const getPersonlessBatchResultSpy = jest.spyOn(personsStore, 'getPersonlessBatchResult')
 
-            const step = createProcessPersonlessStep(personsStore)
+            const step = buildStep()
             await step(createInput())
 
             expect(getPersonlessBatchResultSpy).toHaveBeenCalledWith(teamId, pluginEvent.distinct_id)
@@ -442,7 +446,7 @@ describe('createProcessPersonlessStep', () => {
         it('returns fake person when batch result indicates no merge', async () => {
             jest.spyOn(personsStore, 'getPersonlessBatchResult').mockReturnValue(false)
 
-            const step = createProcessPersonlessStep(personsStore)
+            const step = buildStep()
             const result = await step(createInput())
 
             expect(result.type).toBe(PipelineResultType.OK)
@@ -462,7 +466,7 @@ describe('createProcessPersonlessStep', () => {
                 distinctId: pluginEvent.distinct_id,
             })
 
-            const step = createProcessPersonlessStep(personsStore)
+            const step = buildStep()
             const result = await step(createInput())
 
             expect(result.type).toBe(PipelineResultType.OK)
@@ -481,7 +485,7 @@ describe('createProcessPersonlessStep', () => {
                 distinctId: pluginEvent.distinct_id,
             })
 
-            const step = createProcessPersonlessStep(personsStore)
+            const step = buildStep()
             const result = await step(createInput())
 
             expect(result.type).toBe(PipelineResultType.OK)
@@ -502,7 +506,7 @@ describe('createProcessPersonlessStep', () => {
                 distinctId: pluginEvent.distinct_id,
             })
 
-            const step = createProcessPersonlessStep(personsStore)
+            const step = buildStep()
             const result = await step(createInput())
 
             expect(result.type).toBe(PipelineResultType.OK)
@@ -536,7 +540,7 @@ describe('createProcessPersonlessStep', () => {
             jest.spyOn(personsStore, 'getPersonlessBatchResult').mockReturnValue(true)
             const fetchForUpdateSpy = jest.spyOn(personsStore, 'fetchForUpdate').mockResolvedValue(person)
 
-            const step = createProcessPersonlessStep(personsStore)
+            const step = buildStep()
             const result = await step(createInput())
 
             expect(result.type).toBe(PipelineResultType.OK)
@@ -549,7 +553,7 @@ describe('createProcessPersonlessStep', () => {
             const fetchForCheckingSpy = jest.spyOn(personsStore, 'fetchForChecking')
             const getPersonlessBatchResultSpy = jest.spyOn(personsStore, 'getPersonlessBatchResult')
 
-            const step = createProcessPersonlessStep(personsStore)
+            const step = buildStep()
             const result = await step(createInput({ forceDisablePersonProcessing: true }))
 
             expect(result.type).toBe(PipelineResultType.OK)
@@ -567,7 +571,7 @@ describe('createProcessPersonlessStep', () => {
         it('performs normal processing when false', async () => {
             const fetchForCheckingSpy = jest.spyOn(personsStore, 'fetchForChecking')
 
-            const step = createProcessPersonlessStep(personsStore)
+            const step = buildStep()
             await step(createInput())
 
             expect(fetchForCheckingSpy).toHaveBeenCalled()
@@ -575,7 +579,7 @@ describe('createProcessPersonlessStep', () => {
 
         it('works with different distinct IDs', async () => {
             const distinctIds = ['user-1', 'user-2', 'user-3']
-            const step = createProcessPersonlessStep(personsStore)
+            const step = buildStep()
 
             for (const distinctId of distinctIds) {
                 const result = await step(
