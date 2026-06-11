@@ -48,6 +48,7 @@ from posthog.temporal.data_imports.sources.postgres.postgres import (
     _get_partition_settings,
     _get_partition_settings_for_partitioned_table,
     _get_primary_keys,
+    _get_rows_to_sync,
     _get_sslmode,
     _get_table,
     _get_table_chunk_size,
@@ -176,6 +177,9 @@ class TestIsConnectionDroppedError:
             psycopg.errors.ProtocolViolation("server conn crashed?"),
             psycopg.OperationalError("server closed the connection unexpectedly"),
             psycopg.OperationalError("connection to server was lost"),
+            # Change 1's synthesized message — must stay classified as retryable so the
+            # culled-mid-discovery case retries instead of surfacing as a hard failure.
+            psycopg.OperationalError("connection to server was lost during schema discovery for public.events"),
             psycopg.OperationalError("connection to server was closed unexpectedly"),
             psycopg.OperationalError("consuming input failed: EOF detected"),
             psycopg.OperationalError("terminating connection due to administrator command"),
@@ -1157,6 +1161,60 @@ class TestGetTableChunkSize:
 
             dj_cursor.execute("SELECT 1")
             assert dj_cursor.fetchone()[0] == 1
+
+
+class TestProbesReraiseOnBrokenConnection:
+    def _mock_cursor(self, *, broken: bool, error: Exception):
+        cursor = mock.MagicMock()
+        cursor.connection.broken = broken
+        cursor.execute.side_effect = error
+        return cursor
+
+    # Each probe has a different signature — wrap them so the test only varies the cursor.
+    @pytest.fixture(
+        params=[
+            (
+                "_get_table_chunk_size",
+                lambda cursor, logger: _get_table_chunk_size(cursor, sql.SQL("SELECT 1").format(), logger),
+                DEFAULT_CHUNK_SIZE,
+            ),
+            (
+                "_get_rows_to_sync",
+                lambda cursor, logger: _get_rows_to_sync(cursor, sql.SQL("SELECT COUNT(*)").format(), logger),
+                0,
+            ),
+            (
+                "_role_subject_to_rls",
+                lambda cursor, logger: _role_subject_to_rls(cursor, "public", "events", logger),
+                False,
+            ),
+        ],
+        ids=["chunk_size", "rows_to_sync", "rls"],
+    )
+    def probe(self, request):
+        return request.param
+
+    def test_reraises_when_connection_broken(self, probe):
+        _name, run_probe, _default = probe
+        logger = structlog.get_logger()
+        cursor = self._mock_cursor(
+            broken=True,
+            error=psycopg.OperationalError("server closed the connection unexpectedly"),
+        )
+
+        # `capture_exception` (used by _get_rows_to_sync) must never be reached on the broken path.
+        with patch("posthog.temporal.data_imports.sources.postgres.postgres.capture_exception") as capture:
+            with pytest.raises(psycopg.OperationalError, match="server closed the connection unexpectedly"):
+                run_probe(cast(Any, cursor), logger)
+            capture.assert_not_called()
+
+    def test_returns_default_when_connection_healthy(self, probe):
+        _name, run_probe, default = probe
+        logger = structlog.get_logger()
+        cursor = self._mock_cursor(broken=False, error=Exception("some unrelated probe failure"))
+
+        with patch("posthog.temporal.data_imports.sources.postgres.postgres.capture_exception"):
+            assert run_probe(cast(Any, cursor), logger) == default
 
 
 class TestPartitionedTableChunkSizing:
