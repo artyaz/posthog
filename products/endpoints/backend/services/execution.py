@@ -14,10 +14,9 @@ import uuid
 from datetime import timedelta
 from typing import Literal, Union
 
-from django.utils import timezone
-
-import structlog
 import posthoganalytics
+import structlog
+from django.utils import timezone
 from asgiref.sync import async_to_sync
 from dateutil.parser import isoparse
 from pydantic import BaseModel
@@ -54,6 +53,7 @@ from posthog.models import Team, User
 from products.data_modeling.backend.models.datawarehouse_saved_query import DataWarehouseSavedQuery
 from products.data_warehouse.backend.data_load.saved_query_service import trigger_saved_query_schedule
 from products.endpoints.backend.insight_transformers import MaterializedSeriesMismatchError
+from products.endpoints.backend.logs import build_execution_message, log_endpoint_execution
 from products.endpoints.backend.metrics import (
     ENDPOINT_CACHE_RESULT_TOTAL,
     ENDPOINT_CONCURRENCY_REJECTED_TOTAL,
@@ -199,6 +199,27 @@ class EndpointExecutionService(PydanticModelMixin):
     # ------------------------------------------------------------------
     # Validation
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def format_validation_detail(detail: object) -> str:
+        """Flatten a DRF ValidationError detail into one line for logs."""
+        if isinstance(detail, dict):
+            return "; ".join(
+                f"{field}: {EndpointExecutionService.format_validation_detail(messages)}"
+                for field, messages in detail.items()
+            )
+        if isinstance(detail, list):
+            return "; ".join(EndpointExecutionService.format_validation_detail(item) for item in detail)
+        return str(detail)
+
+    def log_rejected_run(self, endpoint: Endpoint, reason: str) -> None:
+        log_endpoint_execution(
+            team_id=self.team.pk,
+            endpoint_id=str(endpoint.id),
+            instance_id=str(uuid.uuid4()),
+            level="ERROR",
+            message=f"Endpoint execution failed · invalid request · {reason}",
+        )
 
     def validate_run_request(
         self,
@@ -359,7 +380,11 @@ class EndpointExecutionService(PydanticModelMixin):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        self.validate_run_request(data, endpoint, version_obj, offset=offset)
+        try:
+            self.validate_run_request(data, endpoint, version_obj, offset=offset)
+        except ValidationError as exc:
+            self.log_rejected_run(endpoint, self.format_validation_detail(exc.detail))
+            raise
 
         # Falls back to the team as the actor for user-less principals (project secret API keys).
         report_user_or_team_action(
@@ -386,7 +411,10 @@ class EndpointExecutionService(PydanticModelMixin):
         execution_type: ExecutionType = "materialized" if use_materialized else "inline"
         query_kind_metric = query_kind_label(version_obj.query)
         execution_status: str | None = None
+        execution_id = str(uuid.uuid4())
+        error_label: str | None = None
         _start_time = time.monotonic()
+        _duration = 0.0
 
         try:
             result: Response | None = None
@@ -429,6 +457,7 @@ class EndpointExecutionService(PydanticModelMixin):
             execution_status = "success"
         except (ExposedHogQLError, ExposedCHQueryError) as e:
             execution_status = "error"
+            error_label = getattr(e, "code_name", None) or type(e).__name__
             logger.exception(
                 "Endpoint execution failed",
                 endpoint_name=endpoint.name,
@@ -437,6 +466,7 @@ class EndpointExecutionService(PydanticModelMixin):
             raise ValidationError("Query execution failed.", getattr(e, "code_name", None))
         except HogVMException:
             execution_status = "error"
+            error_label = "HogVMException"
             logger.exception(
                 "Endpoint execution failed (HogVM)",
                 endpoint_name=endpoint.name,
@@ -444,6 +474,7 @@ class EndpointExecutionService(PydanticModelMixin):
             raise ValidationError("Query execution failed: HogQL virtual machine error")
         except ResolutionError:
             execution_status = "error"
+            error_label = "ResolutionError"
             logger.exception(
                 "Endpoint resolution failed",
                 endpoint_name=endpoint.name,
@@ -452,8 +483,9 @@ class EndpointExecutionService(PydanticModelMixin):
         except ConcurrencyLimitExceeded:
             ENDPOINT_CONCURRENCY_REJECTED_TOTAL.labels(team_id=str(self.team.pk)).inc()
             raise Throttled(detail="Too many concurrent requests. Please try again later.")
-        except Exception:
+        except Exception as e:
             execution_status = "error"
+            error_label = type(e).__name__
             raise
         finally:
             if execution_status is not None:
@@ -464,18 +496,50 @@ class EndpointExecutionService(PydanticModelMixin):
                 ENDPOINT_EXECUTION_TOTAL.labels(
                     execution_type=execution_type, query_kind=query_kind_metric, status=execution_status
                 ).inc()
+            if execution_status == "error":
+                log_endpoint_execution(
+                    team_id=self.team.pk,
+                    endpoint_id=str(endpoint.id),
+                    instance_id=execution_id,
+                    level="ERROR",
+                    message=build_execution_message(
+                        succeeded=False,
+                        execution_type=execution_type,
+                        version=version_obj.version,
+                        error=error_label,
+                    ),
+                )
 
-        self._record_result_metrics(result, execution_type, query_kind_metric)
+        cache_outcome, result_row_count = self._record_result_metrics(result, execution_type, query_kind_metric)
+        log_endpoint_execution(
+            team_id=self.team.pk,
+            endpoint_id=str(endpoint.id),
+            instance_id=execution_id,
+            level="INFO",
+            message=build_execution_message(
+                succeeded=True,
+                execution_type=execution_type,
+                cache_outcome=cache_outcome,
+                duration_ms=round(_duration * 1000),
+                rows=result_row_count,
+                version=version_obj.version,
+            ),
+        )
         self._track_last_executed(endpoint, version_obj)
 
         if isinstance(result.data, dict):
             result.data["name"] = endpoint.name
+            result.data["execution_id"] = execution_id
             result.data["endpoint_version"] = version_obj.version
             result.data["endpoint_version_created_at"] = version_obj.created_at.isoformat()
 
         return result
 
-    def _record_result_metrics(self, result: Response, execution_type: str, query_kind_metric: str) -> None:
+    def _record_result_metrics(
+        self, result: Response, execution_type: str, query_kind_metric: str
+    ) -> tuple[str | None, int | None]:
+        cache_outcome: str | None = None
+        result_row_count: int | None = None
         try:
             if isinstance(result.data, dict):
                 # DuckLake bypasses the query result cache entirely — don't claim hit/miss for it.
@@ -488,9 +552,11 @@ class EndpointExecutionService(PydanticModelMixin):
                 if query_kind_metric == "hogql":
                     results_value = result.data.get("results")
                     if isinstance(results_value, list):
-                        ENDPOINT_HOGQL_RESULT_ROWS.labels(execution_type=execution_type).observe(len(results_value))
+                        result_row_count = len(results_value)
+                        ENDPOINT_HOGQL_RESULT_ROWS.labels(execution_type=execution_type).observe(result_row_count)
         except Exception:
             logger.debug("Failed to record endpoint result metrics", exc_info=True)
+        return cache_outcome, result_row_count
 
     def _track_last_executed(self, endpoint: Endpoint, version_obj: EndpointVersion) -> None:
         """Record last execution time (30-minute granularity, personal API key calls only)."""

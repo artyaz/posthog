@@ -10,13 +10,14 @@ and response serialization. Business logic lives in ``backend/services``:
 - ``services.validation``: request payload validation
 """
 
-import re
 import dataclasses
+import re
 
 from django.shortcuts import get_object_or_404
 
 from django_filters.rest_framework import DjangoFilterBackend
 from drf_spectacular.utils import OpenApiParameter, extend_schema_view
+from pydantic import ValidationError as PydanticValidationError
 from rest_framework import serializers, status, viewsets
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.permissions import IsAuthenticated
@@ -32,6 +33,7 @@ from posthog.schema import (
 )
 
 from posthog.api.documentation import extend_schema
+from posthog.api.log_entries import LogEntryMixin
 from posthog.api.mixins import PydanticModelMixin, ValidatedRequest, validated_request
 from posthog.api.routing import TeamAndOrgViewSetMixin
 from posthog.api.shared import UserBasicSerializer
@@ -45,6 +47,7 @@ from posthog.rbac.user_access_control import access_level_satisfied_for_resource
 from posthog.schema_migrations.upgrade import upgrade
 
 from products.endpoints.backend.constants import ENDPOINT_NAME_REGEX
+from products.endpoints.backend.logs import ENDPOINTS_LOG_SOURCE
 from products.endpoints.backend.models import Endpoint, EndpointVersion
 from products.endpoints.backend.openapi import generate_openapi_spec
 from products.endpoints.backend.rate_limit import EndpointBurstThrottle, EndpointSustainedThrottle
@@ -90,9 +93,12 @@ class EndpointViewSet(
     AccessControlViewSetMixin,
     PydanticModelMixin,
     TaggedItemViewSetMixin,
+    LogEntryMixin,
     viewsets.ModelViewSet,
 ):
     scope_object = "endpoint"
+    # Read endpoint execution logs from the `log_entries` table keyed by this source.
+    log_source = ENDPOINTS_LOG_SOURCE
     # Special case for query - these are all essentially read actions
     scope_object_read_actions = [
         "retrieve",
@@ -103,6 +109,7 @@ class EndpointViewSet(
         "materialization_preview",
         "materialization_status",
         "get_endpoints_last_execution_times",
+        "logs",
     ]
     scope_object_write_actions: list[str] = [
         "create",
@@ -400,6 +407,24 @@ class EndpointViewSet(
     # Execution
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _parse_run_request(request: Request) -> EndpointRunRequest:
+        """Parse the run body into field-level errors instead of pydantic's raw error dump."""
+        try:
+            return EndpointRunRequest.model_validate(request.data)
+        except PydanticValidationError as exc:
+            field_errors = {
+                ".".join(str(part) for part in error["loc"]) or "body": error["msg"] for error in exc.errors()
+            }
+            raise ValidationError(field_errors) from exc
+
+    @staticmethod
+    def _rejection_reason(response: Response) -> str:
+        data = response.data
+        if isinstance(data, dict):
+            return str(data.get("error", data))
+        return str(data)
+
     @extend_schema(
         request=EndpointRunRequest,
         responses={200: EndpointRunResponseSerializer},
@@ -410,38 +435,49 @@ class EndpointViewSet(
         """Execute endpoint with optional parameters."""
         endpoint = get_object_or_404(Endpoint, team=self.team, name=name, is_active=True, deleted=False)
         self._enforce_object_level_access(endpoint)
-        data = self.get_model(request.data, EndpointRunRequest)
+        service = EndpointExecutionService(self.team, request)
+        try:
+            data = self._parse_run_request(request)
+        except ValidationError as exc:
+            service.log_rejected_run(endpoint, service.format_validation_detail(exc.detail))
+            raise
 
         version_number, err = self._parse_int_param(data.version, request.query_params.get("version"), "version")
         if err:
+            service.log_rejected_run(endpoint, self._rejection_reason(err))
             return err
         limit, err = self._parse_int_param(data.limit, request.query_params.get("limit"), "limit", min_value=1)
         if err:
+            service.log_rejected_run(endpoint, self._rejection_reason(err))
             return err
         offset, err = self._parse_int_param(data.offset, request.query_params.get("offset"), "offset", min_value=0)
         if err:
+            service.log_rejected_run(endpoint, self._rejection_reason(err))
             return err
 
         if offset is not None and limit is None:
-            return Response(
+            response = Response(
                 {"error": "offset requires limit to be set"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+            service.log_rejected_run(endpoint, self._rejection_reason(response))
+            return response
 
         version_obj = None
         try:
             version_obj = endpoint.get_version(version_number)
         except EndpointVersion.DoesNotExist:
             if version_number is not None:
-                return Response(
+                response = Response(
                     {
                         "error": f"Version {version_number} not found for endpoint '{name}'",
                         "current_version": endpoint.current_version,
                     },
                     status=status.HTTP_404_NOT_FOUND,
                 )
+                service.log_rejected_run(endpoint, self._rejection_reason(response))
+                return response
 
-        service = EndpointExecutionService(self.team, request)
         return service.execute(endpoint, data, version_obj, limit=limit, offset=offset)
 
     @extend_schema(
