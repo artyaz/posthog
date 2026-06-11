@@ -26673,6 +26673,7 @@ export namespace Schemas {
      * * `pganalyze` - pganalyze
      * * `signals_scout` - Signals scout
      * * `logs` - Logs
+     * * `endpoints` - Endpoints
      */
     export type SourceProductEnum = typeof SourceProductEnum[keyof typeof SourceProductEnum];
 
@@ -26688,6 +26689,7 @@ export namespace Schemas {
       Pganalyze: 'pganalyze',
       SignalsScout: 'signals_scout',
       Logs: 'logs',
+      Endpoints: 'endpoints',
     } as const;
 
     /**
@@ -26700,6 +26702,8 @@ export namespace Schemas {
      * * `issue_spiking` - Issue spiking
      * * `cross_source_issue` - Cross source issue
      * * `alert_state_change` - Alert state change
+     * * `endpoint_execution_failed` - Endpoint execution failed
+     * * `endpoint_breakdown_limit_exceeded` - Endpoint breakdown limit exceeded
      */
     export type SignalSourceConfigSourceTypeEnum = typeof SignalSourceConfigSourceTypeEnum[keyof typeof SignalSourceConfigSourceTypeEnum];
 
@@ -26714,6 +26718,8 @@ export namespace Schemas {
       IssueSpiking: 'issue_spiking',
       CrossSourceIssue: 'cross_source_issue',
       AlertStateChange: 'alert_state_change',
+      EndpointExecutionFailed: 'endpoint_execution_failed',
+      EndpointBreakdownLimitExceeded: 'endpoint_breakdown_limit_exceeded',
     } as const;
 
     export interface SignalSourceConfig {

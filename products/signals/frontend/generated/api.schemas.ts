@@ -1104,6 +1104,7 @@ export interface ForgetResponseApi {
  * * `pganalyze` - pganalyze
  * * `signals_scout` - Signals scout
  * * `logs` - Logs
+ * * `endpoints` - Endpoints
  */
 export type SourceProductEnumApi = (typeof SourceProductEnumApi)[keyof typeof SourceProductEnumApi]
 
@@ -1118,6 +1119,7 @@ export const SourceProductEnumApi = {
     Pganalyze: 'pganalyze',
     SignalsScout: 'signals_scout',
     Logs: 'logs',
+    Endpoints: 'endpoints',
 } as const
 
 /**
@@ -1130,6 +1132,8 @@ export const SourceProductEnumApi = {
  * * `issue_spiking` - Issue spiking
  * * `cross_source_issue` - Cross source issue
  * * `alert_state_change` - Alert state change
+ * * `endpoint_execution_failed` - Endpoint execution failed
+ * * `endpoint_breakdown_limit_exceeded` - Endpoint breakdown limit exceeded
  */
 export type SignalSourceConfigSourceTypeEnumApi =
     (typeof SignalSourceConfigSourceTypeEnumApi)[keyof typeof SignalSourceConfigSourceTypeEnumApi]
@@ -1144,6 +1148,8 @@ export const SignalSourceConfigSourceTypeEnumApi = {
     IssueSpiking: 'issue_spiking',
     CrossSourceIssue: 'cross_source_issue',
     AlertStateChange: 'alert_state_change',
+    EndpointExecutionFailed: 'endpoint_execution_failed',
+    EndpointBreakdownLimitExceeded: 'endpoint_breakdown_limit_exceeded',
 } as const
 
 export interface SignalSourceConfigApi {
