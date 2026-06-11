@@ -83,7 +83,7 @@ def _qualify_legacy_row(
     new_sync_type_config: dict[str, Any] = {**sync_type_config, "schema_metadata": merged_metadata}
     # `s3_folder_path` is the source of truth; the JSON key is written transitionally so workers
     # still on the old code keep reading the legacy path during rollout.
-    storage_key = sync_type_config.get("dwh_storage_key") or row.s3_folder_path or row.name
+    storage_key = row.resolved_s3_folder_path or row.name
     new_sync_type_config["dwh_storage_key"] = storage_key
 
     update_fields = ["name", "sync_type_config", "updated_at"]

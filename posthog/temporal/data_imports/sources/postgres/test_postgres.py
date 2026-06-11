@@ -249,6 +249,9 @@ class TestPostgresSourceForPipelineSchemaResolution:
         schema.schema_metadata = schema_metadata
         schema.sync_type_config = sync_type_config or {}
         schema.s3_folder_path = s3_folder_path
+        # MagicMock auto-attrs are truthy; pin the property to what the real model would resolve
+        # (resolution itself is covered by warehouse_sources test_models).
+        schema.resolved_s3_folder_path = s3_folder_path
         schema.source = source_model or mock.MagicMock()
         return schema
 
@@ -340,38 +343,8 @@ class TestPostgresSourceForPipelineSchemaResolution:
                 f"legacy folder; got {response.name!r}"
             )
 
-    def test_legacy_json_storage_key_still_drives_response_name(self, source):
-        # Rows written by old code (column unset, key only in sync_type_config) must keep their path
-        # during rollout — the reader falls back to the JSON key.
-        from posthog.temporal.data_imports.naming_convention import NamingConvention
-
-        schema_model = self._make_schema_model(
-            "public.example_table",
-            schema_metadata={"source_schema": "public", "source_table_name": "example_table"},
-            sync_type_config={"dwh_storage_key": "example_table"},
-            s3_folder_path=None,
-        )
-        inputs = self._make_inputs("public.example_table")
-        config = self._make_config(schema=None)
-
-        with (
-            mock.patch(
-                "products.warehouse_sources.backend.models.external_data_schema.ExternalDataSchema.objects"
-            ) as objects_mock,
-            mock.patch("posthog.temporal.data_imports.sources.postgres.source.postgres_source") as postgres_source_mock,
-            mock.patch("posthog.temporal.data_imports.sources.postgres.source.source_requires_ssl", return_value=False),
-            mock.patch.object(source, "make_ssh_tunnel_func", return_value=lambda: None),
-        ):
-            response = mock.MagicMock()
-            objects_mock.select_related.return_value.get.return_value = schema_model
-            postgres_source_mock.return_value = response
-
-            source.source_for_pipeline(config, inputs)
-
-            assert response.name == NamingConvention.normalize_identifier("example_table")
-
     def test_response_name_uses_schema_name_when_no_storage_key(self, source):
-        # New (non-migrated) rows have no dwh_storage_key — response.name falls back to the row's
+        # New (non-migrated) rows have no s3_folder_path — response.name falls back to the row's
         # current name so the Delta path matches `url_pattern` (also derived from the row's name).
         from posthog.temporal.data_imports.naming_convention import NamingConvention
 

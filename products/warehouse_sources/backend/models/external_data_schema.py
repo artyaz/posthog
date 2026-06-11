@@ -236,6 +236,16 @@ class ExternalDataSchema(ModelActivityMixin, CreatedMetaFields, UpdatedMetaField
         return None
 
     @property
+    def resolved_s3_folder_path(self) -> str | None:
+        # JSON fallback covers rows written by old workers before the column rollout.
+        if self.s3_folder_path:
+            return self.s3_folder_path
+        legacy_key = (self.sync_type_config or {}).get("dwh_storage_key")
+        if isinstance(legacy_key, str) and legacy_key:
+            return legacy_key
+        return None
+
+    @property
     def foreign_keys(self) -> list[dict[str, str]] | None:
         metadata = self.schema_metadata
         if metadata:

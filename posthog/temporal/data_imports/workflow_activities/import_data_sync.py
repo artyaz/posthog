@@ -162,7 +162,7 @@ async def import_data_activity_sync(inputs: ImportDataActivityInputs) -> Pipelin
                 reset_pipeline=reset_pipeline,
                 enabled_columns=schema.enabled_columns,
                 schema_metadata=schema.schema_metadata,
-                s3_folder_path=schema.s3_folder_path or (schema.sync_type_config or {}).get("dwh_storage_key"),
+                s3_folder_path=schema.resolved_s3_folder_path,
             )
 
             new_source = SourceRegistry.get_source(source_type)

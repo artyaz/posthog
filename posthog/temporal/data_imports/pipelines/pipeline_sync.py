@@ -180,10 +180,7 @@ async def validate_schema_and_update_table(
 
         # `s3_folder_path` pins the Delta path to the original unqualified name for legacy
         # warehouse rows that got renamed to qualified form during multi-schema migration.
-        storage_key = external_data_schema.s3_folder_path or (external_data_schema.sync_type_config or {}).get(
-            "dwh_storage_key"
-        )
-        storage_schema_name = storage_key if isinstance(storage_key, str) and storage_key else _schema_name
+        storage_schema_name = external_data_schema.resolved_s3_folder_path or _schema_name
 
         table_name = build_table_name(job.pipeline, storage_schema_name)
         normalized_schema_name = NamingConvention.normalize_identifier(storage_schema_name)
