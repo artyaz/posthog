@@ -549,10 +549,10 @@ class EndpointExecutionService(PydanticModelMixin):
                         execution_type=execution_type, query_kind=query_kind_metric, outcome=cache_outcome
                     ).inc()
 
-                if query_kind_metric == "hogql":
-                    results_value = result.data.get("results")
-                    if isinstance(results_value, list):
-                        result_row_count = len(results_value)
+                results_value = result.data.get("results")
+                if isinstance(results_value, list):
+                    result_row_count = len(results_value)
+                    if query_kind_metric == "hogql":
                         ENDPOINT_HOGQL_RESULT_ROWS.labels(execution_type=execution_type).observe(result_row_count)
         except Exception:
             logger.debug("Failed to record endpoint result metrics", exc_info=True)
