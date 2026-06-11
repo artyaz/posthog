@@ -225,7 +225,7 @@ def ensure_web_stats_frustration_precomputed(
     placeholders: dict[str, ast.Expr] = {
         "events_session_id": _events_session_id_expr(runner),
         "breakdown_value_expr": _breakdown_value_expr(runner),
-        "user_filter": host_filter_expr(runner.query.properties or []),
+        "user_filter": host_filter_expr(runner.query.properties or [], team=runner.team),
         "test_account_filter": test_account_filter_expr(
             test_account_filters=runner._test_account_filters, team=runner.team
         ),
