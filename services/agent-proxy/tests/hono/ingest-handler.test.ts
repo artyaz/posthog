@@ -285,6 +285,8 @@ function makeConfig(overrides?: Partial<Config>): Config {
         corsOrigins: new Set(),
         djangoCallbackBaseUrl: '',
         agentProxyCallbackSecret: '',
+        maxConcurrentStreams: 1000,
+        maxStreamsPerRun: 25,
         port: 8003,
         host: '0.0.0.0',
         shutdownGraceMs: 300_000,

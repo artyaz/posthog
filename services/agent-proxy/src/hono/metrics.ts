@@ -63,6 +63,15 @@ export const taskRunStreamResumeGapTotal = new Counter({
     registers: [register],
 })
 
+// Connections turned away by the concurrency caps before any Redis work; reason is
+// 'pod_capacity' (pod-wide total reached) or 'run_capacity' (per-run fanout reached).
+export const taskRunStreamConnectionsRejectedTotal = new Counter({
+    name: 'posthog_tasks_task_run_stream_connections_rejected_total',
+    help: 'SSE task-run stream connections rejected by concurrency caps',
+    labelNames: ['reason'],
+    registers: [register],
+})
+
 // ---------------------------------------------------------------------------
 // Ingest plane metrics
 // ---------------------------------------------------------------------------
@@ -156,6 +165,10 @@ export function observeStreamLengthOnConnect(length: number): void {
 
 export function observeStreamResumeGap(originProduct: string): void {
     taskRunStreamResumeGapTotal.labels({ origin_product: originProduct }).inc()
+}
+
+export function observeStreamConnectionRejected(reason: string): void {
+    taskRunStreamConnectionsRejectedTotal.labels({ reason }).inc()
 }
 
 export function observeStreamIngestEvents(opts: { accepted: number; duplicate: number }): void {

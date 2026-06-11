@@ -182,10 +182,12 @@ export async function* streamTaskRunEvents(
 
         // Dedicated connection for the blocking XREAD loop so it cannot delay the
         // shared client's ingest writes (XADD, WATCH/MULTI) or non-blocking reads.
-        // FOLLOWUP: if pod-level connection count becomes a concern, replace the
-        // per-stream duplicate with a small bounded pool of blocking-read connections
-        // shared across streams. Not worth the complexity until profiling shows a
-        // connection-count problem.
+        // Connection count is bounded upstream by StreamCapacity (app.ts), which caps
+        // concurrent streams per pod and per run before this duplicate is created.
+        // FOLLOWUP: if pod-level connection count becomes a concern within those caps,
+        // replace the per-stream duplicate with a small bounded pool of blocking-read
+        // connections shared across streams. Not worth the complexity until profiling
+        // shows a connection-count problem.
         // enableOfflineQueue:false + lazyConnect means we must call connect() explicitly
         // before the first command and register an error listener.
         dedupRedis = redis.duplicate()

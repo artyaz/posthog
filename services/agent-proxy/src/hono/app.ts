@@ -22,8 +22,10 @@ import type { Config } from '../lib/config.js'
 import { validateStreamReadToken } from '../lib/jwt.js'
 import { logger } from '../lib/logging.js'
 import { getStreamKey } from '../lib/redis-stream.js'
+import { StreamCapacity } from '../lib/stream-capacity.js'
 import type { StreamReadTokenPayload } from '../lib/types.js'
 import { handleIngest } from './ingest-handler.js'
+import { observeStreamConnectionRejected } from './metrics.js'
 import { corsHeaders, corsPreflightHandler, httpMetrics, requestLog, securityHeaders } from './middleware.js'
 import { registerPublicRoutes } from './public-routes.js'
 import { streamTaskRunEvents } from './sse-handler.js'
@@ -45,6 +47,7 @@ export interface App {
 export function createApp(redis: Redis, config: Config, publicKeys: CryptoKey[]): App {
     const app = new Hono()
     const lifecycle: Lifecycle = { shuttingDown: false }
+    const streamCapacity = new StreamCapacity(config.maxConcurrentStreams, config.maxStreamsPerRun)
 
     app.use('*', securityHeaders)
     app.use('*', corsHeaders(config))
@@ -81,6 +84,17 @@ export function createApp(redis: Redis, config: Config, publicKeys: CryptoKey[])
         const lastEventId = c.req.header('Last-Event-ID') ?? c.req.header('last-event-id') ?? null
         const startLatest = c.req.query('start') === 'latest'
         const streamKey = getStreamKey(claims.runId)
+
+        // Reserve a concurrency slot before any Redis work; each accepted stream holds a
+        // dedicated Redis connection until it closes. 503 (not 4xx) so clients reconnect
+        // through their normal backoff instead of treating it as fatal.
+        const rejection = streamCapacity.tryAcquire(claims.runId)
+        if (rejection !== null) {
+            observeStreamConnectionRejected(rejection)
+            logger.warn('stream:rejected_capacity', { run, reason: rejection, open: streamCapacity.openTotal })
+            c.header('Retry-After', '5')
+            return c.json({ error: 'Too many concurrent stream connections' }, 503)
+        }
 
         logger.info('stream:open', { run, lastEventId: lastEventId ?? undefined, startLatest })
 
@@ -127,6 +141,7 @@ export function createApp(redis: Redis, config: Config, publicKeys: CryptoKey[])
                     }
                 }
             } finally {
+                streamCapacity.release(claims.runId)
                 signal.removeEventListener('abort', onAbort)
                 // Ensure the generator's cleanup runs even if we broke early.
                 await generator.return(undefined).catch(() => undefined)

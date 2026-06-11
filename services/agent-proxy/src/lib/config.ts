@@ -6,12 +6,14 @@
 //   AGENT_PROXY_DJANGO_CALLBACK_URL
 //
 // Optional with defaults:
-//   SANDBOX_JWT_PUBLIC_KEY_SECONDARY — extra public key trusted during key rotation
-//   TASKS_AGENT_PROXY_CORS_ORIGINS  — comma-separated origins; '' disables CORS
-//   PORT                            — default 8003
-//   HOST                            — default '0.0.0.0'
-//   SHUTDOWN_GRACE_MS               — default 300000 (5 min)
-//   SHUTDOWN_PRESTOP_DELAY_MS       — default 0
+//   SANDBOX_JWT_PUBLIC_KEY_SECONDARY    — extra public key trusted during key rotation
+//   TASKS_AGENT_PROXY_CORS_ORIGINS      — comma-separated origins; '' disables CORS
+//   AGENT_PROXY_MAX_CONCURRENT_STREAMS  — default 1000; per-pod cap on open SSE streams
+//   AGENT_PROXY_MAX_STREAMS_PER_RUN     — default 25; per-run cap on open SSE streams
+//   PORT                                — default 8003
+//   HOST                                — default '0.0.0.0'
+//   SHUTDOWN_GRACE_MS                   — default 300000 (5 min)
+//   SHUTDOWN_PRESTOP_DELAY_MS           — default 0
 
 import { getEnv, type KnownEnvKey } from './env.js'
 import { logger } from './logging.js'
@@ -28,6 +30,11 @@ export interface Config {
     // Shared secret sent as X-Agent-Proxy-Secret on the Django callback so Django can prove the call
     // came from this proxy and not directly from a sandbox. Empty disables it (local/dev).
     agentProxyCallbackSecret: string
+    // Each open SSE stream holds a dedicated Redis connection, so these caps protect the Redis
+    // maxclients budget: a pod-wide total and a per-run fanout limit (one stream-read token must
+    // not be able to exhaust the pod).
+    maxConcurrentStreams: number
+    maxStreamsPerRun: number
     port: number
     host: string
     shutdownGraceMs: number
@@ -81,6 +88,20 @@ export function loadConfig(): Config {
 
     const agentProxyCallbackSecret = getEnv('AGENT_PROXY_CALLBACK_SECRET') ?? ''
 
+    const maxConcurrentStreamsRaw = getEnv('AGENT_PROXY_MAX_CONCURRENT_STREAMS')
+    const maxConcurrentStreams = maxConcurrentStreamsRaw !== undefined ? parseInt(maxConcurrentStreamsRaw, 10) : 1000
+    if (Number.isNaN(maxConcurrentStreams) || maxConcurrentStreams <= 0) {
+        logger.error('config:invalid_max_concurrent_streams', { raw: maxConcurrentStreamsRaw })
+        process.exit(1)
+    }
+
+    const maxStreamsPerRunRaw = getEnv('AGENT_PROXY_MAX_STREAMS_PER_RUN')
+    const maxStreamsPerRun = maxStreamsPerRunRaw !== undefined ? parseInt(maxStreamsPerRunRaw, 10) : 25
+    if (Number.isNaN(maxStreamsPerRun) || maxStreamsPerRun <= 0) {
+        logger.error('config:invalid_max_streams_per_run', { raw: maxStreamsPerRunRaw })
+        process.exit(1)
+    }
+
     const corsOrigins = parseCorsOrigins(getEnv('TASKS_AGENT_PROXY_CORS_ORIGINS') ?? '')
 
     const portRaw = getEnv('PORT')
@@ -103,6 +124,8 @@ export function loadConfig(): Config {
         corsOrigins,
         djangoCallbackBaseUrl,
         agentProxyCallbackSecret,
+        maxConcurrentStreams,
+        maxStreamsPerRun,
         port,
         host,
         shutdownGraceMs,

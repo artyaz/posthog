@@ -51,6 +51,15 @@ AGENT_PROXY_DJANGO_CALLBACK_URL=http://localhost:8000
 # TCP port the Hono server listens on. Optional; default 8003.
 PORT=8003
 
+# Per-pod cap on concurrent SSE stream connections. Each open stream holds a
+# dedicated Redis connection, so this protects the Redis maxclients budget.
+# Optional; default 1000.
+AGENT_PROXY_MAX_CONCURRENT_STREAMS=1000
+
+# Cap on concurrent SSE stream connections per task run, so a single
+# stream-read token cannot exhaust the pod-wide budget. Optional; default 25.
+AGENT_PROXY_MAX_STREAMS_PER_RUN=25
+
 # TCP bind address. Optional; default 0.0.0.0 (all interfaces).
 HOST=0.0.0.0
 
