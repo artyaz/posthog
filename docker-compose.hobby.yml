@@ -103,6 +103,10 @@ services:
             PERSONHOG_ADDR: 'personhog-router:50052'
             PERSONHOG_ENABLED: 'true'
             PERSONHOG_ROLLOUT_PERCENTAGE: '100'
+            BROWSERLESS_CDP_URL: 'ws://browserless:3000'
+            BROWSERLESS_TOKEN: $POSTHOG_SECRET
+            HEATMAP_BROWSERLESS_URL: 'http://browserless:3000'
+            HEATMAP_BROWSERLESS_TOKEN: $POSTHOG_SECRET
         image: $REGISTRY_URL:$POSTHOG_APP_TAG
         depends_on:
             db:
@@ -116,6 +120,8 @@ services:
             web:
                 condition: service_started
             personhog-router:
+                condition: service_started
+            browserless:
                 condition: service_started
     web:
         extends:
@@ -330,6 +336,14 @@ services:
             retries: 30
             start_period: 10s
 
+    browserless:
+        # Renders image exports and heatmap screenshots (no browser ships in the PostHog image).
+        image: ghcr.io/browserless/chromium:v2.51.2
+        restart: on-failure
+        logging: *default-logging
+        environment:
+            TOKEN: $POSTHOG_SECRET
+
     asyncmigrationscheck:
         extends:
             file: docker-compose.base.yml
@@ -389,6 +403,10 @@ services:
         environment:
             SITE_URL: https://$DOMAIN
             SECRET_KEY: $POSTHOG_SECRET
+            BROWSERLESS_CDP_URL: 'ws://browserless:3000'
+            BROWSERLESS_TOKEN: $POSTHOG_SECRET
+            HEATMAP_BROWSERLESS_URL: 'http://browserless:3000'
+            HEATMAP_BROWSERLESS_TOKEN: $POSTHOG_SECRET
         depends_on:
             - db
             - redis7
@@ -397,6 +415,7 @@ services:
             - objectstorage
             - seaweedfs
             - temporal
+            - browserless
 
     cyclotron-janitor:
         extends:
