@@ -26,7 +26,11 @@ SANDBOX_EVENT_INGEST_TOKEN_TTL = timedelta(seconds=SANDBOX_TTL_SECONDS) + SANDBO
 SANDBOX_JWT_STATE_KID_KEY = "sandbox_jwt_kid"
 
 STREAM_READ_AUDIENCE = "posthog:stream_read"
-STREAM_READ_TOKEN_TTL = timedelta(seconds=SANDBOX_TTL_SECONDS) + SANDBOX_EVENT_INGEST_TOKEN_TTL_BUFFER
+# Short-lived on purpose: the agent-proxy validates these tokens statelessly, so the TTL bounds
+# how long a user who lost project access can keep reconnecting to a stream. The client fetches a
+# fresh token from the stream_token endpoint (which re-checks access) on every connect, and again
+# when a reconnect is rejected with a 401 after the token expires mid-stream.
+STREAM_READ_TOKEN_TTL = timedelta(minutes=15)
 
 
 @dataclass(frozen=True)

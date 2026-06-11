@@ -467,6 +467,7 @@ export const taskDetailSceneLogic = kea<taskDetailSceneLogicType>([
                 const toolMap = buildToolMap(values.streamEntries)
                 let eventIndex = values.streamEntries.length
                 let reconnectCount = 0
+                let tokenRefreshes = 0
                 let terminated = false
                 let disposed = false
 
@@ -507,6 +508,7 @@ export const taskDetailSceneLogic = kea<taskDetailSceneLogicType>([
                             headers: { ...target.headers, ...(resumeId ? { 'Last-Event-ID': resumeId } : {}) },
                             onOpen: () => {
                                 reconnectCount = 0
+                                tokenRefreshes = 0
                             },
                             onMessage: (message) => {
                                 if (terminated) {
@@ -558,7 +560,23 @@ export const taskDetailSceneLogic = kea<taskDetailSceneLogicType>([
                                 throw new Error('stream closed before completion')
                             },
                         })
-                    } catch {
+                    } catch (error) {
+                        // Stream read tokens are short-lived (the proxy validates them statelessly),
+                        // so a reconnect on a long stream can outlive its token. On a 401 from the
+                        // proxy leg, re-resolve the target — minting a fresh token re-checks access
+                        // server-side — instead of giving up. Revoked users fail the re-resolve and
+                        // land on the Django path, whose 4xx stays fatal.
+                        const status = (error as { status?: number } | undefined)?.status
+                        if (
+                            !disposed &&
+                            !terminated &&
+                            status === 401 &&
+                            target.headers.Authorization &&
+                            tokenRefreshes < MAX_STREAM_RECONNECTS
+                        ) {
+                            tokenRefreshes += 1
+                            return consume()
+                        }
                         // Aborted, fatal, or reconnects exhausted — reconciled below
                     }
 

@@ -531,6 +531,35 @@ describe('taskDetailSceneLogic', () => {
             logic.unmount()
         })
 
+        it('refreshes the stream token and reconnects when the proxy rejects an expired token', async () => {
+            const run = createMockRun('run-1', TaskRunStatus.IN_PROGRESS)
+            global.fetch = createFetchMock({
+                runs: { [run.id]: run },
+                streamBaseUrl: 'https://proxy.example/',
+                streamResponses: [
+                    new Response(JSON.stringify({ error: 'Invalid stream read token' }), { status: 401 }),
+                    createSseResponse(['id: 1-0\nevent: message\ndata: {"type":"assistant","content":"hi"}\n\n'], true),
+                ],
+            })
+
+            const logic = taskDetailSceneLogic({ taskId: 'task-123' })
+            logic.mount()
+            enableProxyStreaming()
+            await expectLogic(logic).toFinishAllListeners()
+
+            logic.actions.setSelectedRunId(run.id, 'task-123')
+            await expectLogic(logic).toFinishAllListeners()
+            await flushStreaming()
+            await flushStreaming()
+
+            expect(streamTokenFetchCalls()).toHaveLength(2)
+            expect(streamFetchCalls()).toHaveLength(2)
+            expect(logic.values.streamEntries.map((entry) => entry.message)).toEqual(['hi'])
+            expect(logic.values.streamingFailed).toBe(false)
+
+            logic.unmount()
+        })
+
         it('reconnects after a dropped connection without latching to polling', async () => {
             jest.useFakeTimers()
             const run = createMockRun('run-1', TaskRunStatus.IN_PROGRESS)
