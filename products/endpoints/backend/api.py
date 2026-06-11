@@ -11,6 +11,7 @@ and response serialization. Business logic lives in ``backend/services``:
 """
 
 import re
+import dataclasses
 
 from django.shortcuts import get_object_or_404
 
@@ -550,7 +551,7 @@ class EndpointViewSet(
             validate_bucket_overrides(bucket_overrides)
 
         service = EndpointMaterializationService(self.team, request)
-        return Response(service.preview(endpoint, version, bucket_overrides))
+        return Response(dataclasses.asdict(service.preview(endpoint, version, bucket_overrides)))
 
     @extend_schema(
         # url_path="openapi.json" would otherwise produce `..._openapi.json_retrieve` —

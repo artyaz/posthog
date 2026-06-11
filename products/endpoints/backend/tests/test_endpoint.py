@@ -1590,3 +1590,20 @@ class TestClickhouseTypeMapping(TestCase):
         from products.endpoints.backend.models import _clickhouse_type_to_serialized_type
 
         self.assertEqual(_clickhouse_type_to_serialized_type(ch_type), expected)
+
+
+class TestEndpointCreateRollback(APIBaseTest):
+    def test_create_rolls_back_endpoint_when_version_creation_fails(self):
+        from unittest import mock
+
+        payload = {"name": "rollback-endpoint", "query": {"kind": "HogQLQuery", "query": "SELECT 1"}}
+
+        with mock.patch.object(EndpointVersion.objects, "create", side_effect=RuntimeError("boom")):
+            response = self.client.post(f"/api/environments/{self.team.id}/endpoints/", payload, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(Endpoint.objects.filter(team=self.team, name="rollback-endpoint", deleted=False).count(), 0)
+
+        # The name must be reusable after the failed create
+        response = self.client.post(f"/api/environments/{self.team.id}/endpoints/", payload, format="json")
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.json())

@@ -3,14 +3,15 @@
 ``EndpointMaterializationService`` owns enabling/disabling materialization
 (creating and reverting the backing ``DataWarehouseSavedQuery``), the
 materialization preview, and the status payload. The AST-level analysis and
-query transforms live in ``products.endpoints.backend.materialization``.
+query transforms live in ``products.endpoints.backend.materialization_transforms``.
 """
 
+import dataclasses
 from typing import cast
 
 import structlog
 from loginas.utils import is_impersonated_session
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import APIException, ValidationError
 from rest_framework.request import Request
 
 from posthog.hogql import ast
@@ -27,7 +28,7 @@ from posthog.models.activity_logging.activity_log import Detail, log_activity
 from products.data_modeling.backend.models.datawarehouse_saved_query import DataWarehouseSavedQuery
 from products.data_modeling.backend.services.saved_query_dag_sync import delete_node_from_dag, sync_saved_query_to_dag
 from products.endpoints.backend.constants import DATA_FRESHNESS_BUCKETS
-from products.endpoints.backend.materialization import (
+from products.endpoints.backend.materialization_transforms import (
     _extract_aggregate_name,
     analyze_variables_for_materialization,
     build_endpoint_hogql,
@@ -91,15 +92,21 @@ def build_materialization_info(version: EndpointVersion, endpoint_name: str | No
     return result
 
 
-def cant_materialize_preview(reason: str) -> dict:
-    return {
-        "can_materialize": False,
-        "reason": reason,
-        "transformed_query": None,
-        "execution_query": None,
-        "range_pairs": [],
-        "aggregates": [],
-    }
+@dataclasses.dataclass(frozen=True)
+class MaterializationPreview:
+    """Payload of the materialization-preview endpoint."""
+
+    can_materialize: bool
+    reason: str | None = None
+    transformed_query: str | None = None
+    execution_query: str | None = None
+    display_execution_query: str | None = None
+    range_pairs: list[dict] = dataclasses.field(default_factory=list)
+    aggregates: list[dict] = dataclasses.field(default_factory=list)
+
+    @classmethod
+    def cant_materialize(cls, reason: str) -> "MaterializationPreview":
+        return cls(can_materialize=False, reason=reason)
 
 
 class EndpointMaterializationService:
@@ -113,31 +120,29 @@ class EndpointMaterializationService:
     def enable_materialization(
         self,
         endpoint: Endpoint,
+        version: EndpointVersion,
         data_freshness_seconds: int,
-        version: EndpointVersion | None = None,
         bucket_overrides: dict[str, str] | None = None,
     ) -> None:
         """Enable materialization for an endpoint version.
 
-        If version is not specified, uses the current version.
-        Each version gets its own saved_query with naming: {endpoint_name}_v{version}
+        Each version gets its own saved_query named {endpoint_name}_v{version}.
         """
         try:
-            self._enable_materialization_inner(endpoint, data_freshness_seconds, version, bucket_overrides)
+            self._enable_materialization_inner(endpoint, version, data_freshness_seconds, bucket_overrides)
             ENDPOINT_MATERIALIZATION_EVENT_TOTAL.labels(action="enable", status="success").inc()
-            target_version = version or endpoint.get_version()
-            if target_version and target_version.saved_query:
+            if version.saved_query:
                 log_activity(
                     organization_id=self.team.organization_id,
                     team_id=self.team.pk,
                     user=self.user,
                     was_impersonated=is_impersonated_session(self.request),
-                    item_id=str(target_version.saved_query.id),
+                    item_id=str(version.saved_query.id),
                     scope="DataWarehouseSavedQuery",
                     activity="materialization_enabled",
                     detail=Detail(
-                        name=target_version.saved_query.name,
-                        context=EndpointContext(version=target_version.version),
+                        name=version.saved_query.name,
+                        context=EndpointContext(version=version.version),
                     ),
                 )
         except ValidationError:
@@ -145,48 +150,26 @@ class EndpointMaterializationService:
             raise
         except Exception:
             ENDPOINT_MATERIALIZATION_EVENT_TOTAL.labels(action="enable", status="error").inc()
-            raise ValidationError("Failed to enable materialization.")
+            # Not a request-validation problem — surface as a server error, not a 400.
+            raise APIException("Failed to enable materialization.")
 
     def _enable_materialization_inner(
         self,
         endpoint: Endpoint,
+        version: EndpointVersion,
         data_freshness_seconds: int,
-        version: EndpointVersion | None = None,
         bucket_overrides: dict[str, str] | None = None,
     ) -> None:
-        version = version or endpoint.get_version()
-
         can_mat, reason = version.can_materialize()
         if not can_mat:
             raise ValidationError(f"Cannot materialize endpoint. Reason: {reason}")
 
-        # Per-version naming allows independent materialization for each version
-        saved_query_name = f"{endpoint.name}_v{version.version}"
-        saved_query = DataWarehouseSavedQuery.objects.filter(
-            name=saved_query_name, team=self.team, deleted=False
-        ).first()
-        if saved_query is None:
-            saved_query = DataWarehouseSavedQuery(
-                name=saved_query_name,
-                team=self.team,
-                origin=DataWarehouseSavedQuery.Origin.ENDPOINT,
-            )
+        saved_query = self._get_or_build_saved_query(version)
+        self._configure_saved_query(saved_query, version, data_freshness_seconds, bucket_overrides)
+        version.enable_materialization(saved_query, bucket_overrides)
 
-        hogql_query = build_endpoint_hogql(version.query, self.team, bucket_overrides=bucket_overrides)
-
-        saved_query.query = hogql_query
-        saved_query.external_tables = saved_query.s3_tables
-        saved_query.is_materialized = True
-        saved_query.sync_frequency_interval = sync_frequency_to_sync_frequency_interval(
-            DATA_FRESHNESS_BUCKETS[data_freshness_seconds]
-        )
-
-        saved_query.save()
-
-        version.saved_query = saved_query
-        version.bucket_overrides = bucket_overrides
-        version.save(update_fields=["saved_query", "bucket_overrides", "updated_at"])
-
+        # NOTE: schedule_materialization only triggers an immediate run when it CREATES the
+        # Temporal schedule; re-enabling an existing materialization just (re)syncs the schedule.
         saved_query.schedule_materialization()
 
         try:
@@ -195,7 +178,7 @@ class EndpointMaterializationService:
             logger.exception(
                 "Failed to sync endpoint node to DAG",
                 endpoint_name=endpoint.name,
-                saved_query_id=version.saved_query.id if version and version.saved_query else None,
+                saved_query_id=saved_query.id,
             )
             capture_exception(
                 e,
@@ -203,56 +186,97 @@ class EndpointMaterializationService:
                     "product": Product.ENDPOINTS,
                     "team_id": self.team.pk,
                     "endpoint_name": endpoint.name,
-                    "saved_query_id": version.saved_query.id if version and version.saved_query else None,
+                    "saved_query_id": saved_query.id,
                 },
             )
 
-    def disable_materialization(self, endpoint: Endpoint, version: EndpointVersion | None = None) -> None:
-        """Disable materialization for an endpoint version.
+    def _get_or_build_saved_query(self, version: EndpointVersion) -> DataWarehouseSavedQuery:
+        """Find this version's saved query, or build a new (unsaved) one.
 
-        If version is not specified, uses the current version.
+        SECURITY: only adopt a saved query that this endpoint owns (ENDPOINT origin and not
+        linked to a different version). Without this, a user-created saved query whose name
+        happens to collide with {endpoint}_v{n} would be silently taken over — its query
+        overwritten and served as the endpoint's data.
         """
-        version = version or endpoint.get_version()
-        if version:
-            if version.saved_query:
-                saved_query_id = str(version.saved_query.id)
-                saved_query_name = version.saved_query.name
-                try:
-                    delete_node_from_dag(version.saved_query)
-                except Exception as e:
-                    logger.exception(
-                        "Failed to remove endpoint node from DAG",
-                        endpoint_name=endpoint.name,
-                        saved_query_id=version.saved_query.id if version and version.saved_query else None,
-                    )
-                    capture_exception(
-                        e,
-                        {
-                            "product": Product.ENDPOINTS,
-                            "team_id": self.team.pk,
-                            "endpoint_name": endpoint.name,
-                            "saved_query_id": version.saved_query.id if version and version.saved_query else None,
-                        },
-                    )
-                try:
-                    version.disable_materialization()
-                except Exception:
-                    ENDPOINT_MATERIALIZATION_EVENT_TOTAL.labels(action="disable", status="error").inc()
-                    raise
-                ENDPOINT_MATERIALIZATION_EVENT_TOTAL.labels(action="disable", status="success").inc()
-                log_activity(
-                    organization_id=self.team.organization_id,
-                    team_id=self.team.pk,
-                    user=self.user,
-                    was_impersonated=is_impersonated_session(self.request),
-                    item_id=saved_query_id,
-                    scope="DataWarehouseSavedQuery",
-                    activity="materialization_disabled",
-                    detail=Detail(
-                        name=saved_query_name,
-                        context=EndpointContext(version=version.version),
-                    ),
+        name = version.materialized_view_name
+        existing = DataWarehouseSavedQuery.objects.filter(name=name, team=self.team, deleted=False).first()
+        if existing is None:
+            return DataWarehouseSavedQuery(
+                name=name,
+                team=self.team,
+                origin=DataWarehouseSavedQuery.Origin.ENDPOINT,
+            )
+
+        is_foreign = existing.origin != DataWarehouseSavedQuery.Origin.ENDPOINT or (
+            existing.endpoint_versions.exclude(pk=version.pk).exists()
+        )
+        if is_foreign:
+            raise ValidationError(
+                f"A saved query named '{name}' already exists and is not managed by this endpoint. "
+                "Rename or delete it before enabling materialization."
+            )
+        return existing
+
+    def _configure_saved_query(
+        self,
+        saved_query: DataWarehouseSavedQuery,
+        version: EndpointVersion,
+        data_freshness_seconds: int,
+        bucket_overrides: dict[str, str] | None,
+    ) -> None:
+        """Point the saved query at the version's materializable HogQL and sync cadence."""
+        saved_query.query = build_endpoint_hogql(version.query, self.team, bucket_overrides=bucket_overrides)
+        saved_query.external_tables = saved_query.s3_tables
+        saved_query.is_materialized = True
+        saved_query.sync_frequency_interval = sync_frequency_to_sync_frequency_interval(
+            DATA_FRESHNESS_BUCKETS[data_freshness_seconds]
+        )
+        saved_query.save()
+
+    def disable_materialization(self, endpoint: Endpoint, version: EndpointVersion) -> None:
+        """Disable materialization for an endpoint version."""
+        if version.saved_query:
+            saved_query_id = str(version.saved_query.id)
+            saved_query_name = version.saved_query.name
+            try:
+                delete_node_from_dag(version.saved_query)
+            except Exception as e:
+                logger.exception(
+                    "Failed to remove endpoint node from DAG",
+                    endpoint_name=endpoint.name,
+                    saved_query_id=saved_query_id,
                 )
+                capture_exception(
+                    e,
+                    {
+                        "product": Product.ENDPOINTS,
+                        "team_id": self.team.pk,
+                        "endpoint_name": endpoint.name,
+                        "saved_query_id": saved_query_id,
+                    },
+                )
+            try:
+                version.disable_materialization()
+            except Exception:
+                ENDPOINT_MATERIALIZATION_EVENT_TOTAL.labels(action="disable", status="error").inc()
+                raise
+            ENDPOINT_MATERIALIZATION_EVENT_TOTAL.labels(action="disable", status="success").inc()
+            log_activity(
+                organization_id=self.team.organization_id,
+                team_id=self.team.pk,
+                user=self.user,
+                was_impersonated=is_impersonated_session(self.request),
+                item_id=saved_query_id,
+                scope="DataWarehouseSavedQuery",
+                activity="materialization_disabled",
+                detail=Detail(
+                    name=saved_query_name,
+                    context=EndpointContext(version=version.version),
+                ),
+            )
+        # The throttle cache is endpoint-level (one key per team+name, reflecting the
+        # current version) — clearing it forces a lazy re-check from the DB, which is
+        # correct even when a non-current version was disabled.
         clear_endpoint_materialization_cache(self.team.pk, endpoint.name)
 
     def preview(
@@ -260,15 +284,11 @@ class EndpointMaterializationService:
         endpoint: Endpoint,
         version: EndpointVersion,
         bucket_overrides: dict[str, str] | None = None,
-    ) -> dict:
-        """Preview the materialization transform without enabling it.
-
-        Returns the response payload: transformed query, range pair info, and
-        aggregate re-aggregation info.
-        """
+    ) -> MaterializationPreview:
+        """Preview the materialization transform without enabling it."""
         can_mat, reason = version.can_materialize()
         if not can_mat:
-            return cant_materialize_preview(reason)
+            return MaterializationPreview.cant_materialize(reason)
 
         hogql_query = convert_insight_query_to_hogql(version.query, self.team)
 
@@ -283,7 +303,7 @@ class EndpointMaterializationService:
             )
 
             if not can_materialize_vars:
-                return cant_materialize_preview(var_reason)
+                return MaterializationPreview.cant_materialize(var_reason)
 
             if variable_infos:
                 transformed = transform_query_for_materialization(
@@ -309,8 +329,23 @@ class EndpointMaterializationService:
                 if query_str:
                     try:
                         parsed = parse_select(query_str)
-                    except Exception:
-                        logger.warning("materialization_preview: failed to parse HogQL for aggregate extraction")
+                    except Exception as e:
+                        # Preview degrades (no aggregate re-aggregation info), the request succeeds.
+                        logger.warning(
+                            "materialization_preview: converted HogQL failed to parse; "
+                            "skipping aggregate re-aggregation preview",
+                            endpoint_name=endpoint.name,
+                            team_id=self.team.pk,
+                        )
+                        capture_exception(
+                            e,
+                            {
+                                "product": Product.ENDPOINTS,
+                                "team_id": self.team.pk,
+                                "endpoint_name": endpoint.name,
+                                "materialization_preview": True,
+                            },
+                        )
                     else:
                         if isinstance(parsed, ast.SelectQuery) and parsed.select:
                             for expr in parsed.select:
@@ -336,7 +371,6 @@ class EndpointMaterializationService:
         execution_query_str: str | None = None
         display_execution_query_str: str | None = None
         try:
-            saved_query_name = f"{endpoint.name}_v{version.version}"
             strategy = strategy_for(endpoint, version, self.team)
 
             def _build_exec_preview(table_name: str) -> ast.SelectQuery:
@@ -356,7 +390,7 @@ class EndpointMaterializationService:
                 return q
 
             # Each call builds a fresh SelectQuery, so WHERE mutations don't leak between calls
-            execution_query_str = to_printed_hogql(_build_exec_preview(saved_query_name), team=self.team)
+            execution_query_str = to_printed_hogql(_build_exec_preview(version.materialized_view_name), team=self.team)
 
             # Display variant uses the friendly endpoint name — printed without type resolution
             # since the friendly name isn't a real table in the database
@@ -366,15 +400,28 @@ class EndpointMaterializationService:
                 dialect="hogql",
                 pretty=True,
             )
-        except Exception:
-            logger.debug("Failed to build execution query preview", exc_info=True)
+        except Exception as e:
+            logger.warning(
+                "Failed to build materialization execution query preview",
+                endpoint_name=endpoint.name,
+                team_id=self.team.pk,
+                exc_info=True,
+            )
+            capture_exception(
+                e,
+                {
+                    "product": Product.ENDPOINTS,
+                    "team_id": self.team.pk,
+                    "endpoint_name": endpoint.name,
+                    "materialization_preview": True,
+                },
+            )
 
-        return {
-            "can_materialize": True,
-            "reason": None,
-            "transformed_query": transformed_query_str,
-            "execution_query": execution_query_str,
-            "display_execution_query": display_execution_query_str,
-            "range_pairs": range_pairs,
-            "aggregates": aggregates,
-        }
+        return MaterializationPreview(
+            can_materialize=True,
+            transformed_query=transformed_query_str,
+            execution_query=execution_query_str,
+            display_execution_query=display_execution_query_str,
+            range_pairs=range_pairs,
+            aggregates=aggregates,
+        )

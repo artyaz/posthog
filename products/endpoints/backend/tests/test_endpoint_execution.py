@@ -1702,7 +1702,7 @@ class TestEndpointExecution(ClickhouseTestMixin, APIBaseTest):
         )
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("only supported for HogQL", response.json()["error"])
+        self.assertIn("only supported for HogQL", str(response.json()))
 
     # =========================================================================
     # CALENDAR HEATMAP ENDPOINTS
@@ -1844,8 +1844,8 @@ class TestEndpointExecution(ClickhouseTestMixin, APIBaseTest):
 
         # Patch the limit to a low value so the 30 distinct breakdown values exceed it
         with (
-            mock.patch("products.endpoints.backend.materialization.ENDPOINT_BREAKDOWN_LIMIT", 5),
-            mock.patch("products.endpoints.backend.services.execution.capture_exception") as mock_capture,
+            mock.patch("products.endpoints.backend.materialization_transforms.ENDPOINT_BREAKDOWN_LIMIT", 5),
+            mock.patch("products.endpoints.backend.services.strategies.capture_exception") as mock_capture,
         ):
             response = self.client.post(
                 f"/api/environments/{self.team.id}/endpoints/{endpoint.name}/run/",
@@ -2176,7 +2176,7 @@ class TestEndpointExecution(ClickhouseTestMixin, APIBaseTest):
         before = REGISTRY.get_sample_value("posthog_endpoint_materialization_event_total", labels) or 0.0
 
         service = EndpointMaterializationService(self.team, mock.MagicMock())
-        service.disable_materialization(endpoint)
+        service.disable_materialization(endpoint, endpoint.get_version())
 
         after = REGISTRY.get_sample_value("posthog_endpoint_materialization_event_total", labels) or 0.0
         self.assertEqual(after - before, 0.0)
@@ -2215,3 +2215,195 @@ class TestEndpointExecution(ClickhouseTestMixin, APIBaseTest):
             side_effect=RuntimeError("signal layer exploded"),
         ):
             _emit_endpoint_failure_signal(self.team, endpoint, RuntimeError("original"), materialized=False, version=1)
+
+
+class TestExecutionReviewFixes(ClickhouseTestMixin, APIBaseTest):
+    """Regression tests for PR #62705 review findings."""
+
+    def setUp(self):
+        super().setUp()
+        self.sync_workflow_patcher = mock.patch(
+            "products.data_warehouse.backend.data_load.saved_query_service.sync_saved_query_workflow"
+        )
+        self.sync_workflow_patcher.start()
+
+    def tearDown(self):
+        self.sync_workflow_patcher.stop()
+        super().tearDown()
+
+    def _make_fresh_materialized_endpoint(self, name: str, query: dict):
+        """Endpoint whose current version has a fresh, Completed materialization."""
+        saved_query = DataWarehouseSavedQuery.objects.create(
+            team=self.team,
+            name=f"{name}_v1",
+            query=query,
+            is_materialized=True,
+            status=DataWarehouseSavedQuery.Status.COMPLETED,
+            sync_frequency_interval=timezone.timedelta(hours=24),
+            last_run_at=timezone.now(),
+        )
+        saved_query.table = DataWarehouseTable.objects.create(
+            team=self.team,
+            name=f"{name}_v1",
+            format=DataWarehouseTable.TableFormat.Parquet,
+            url_pattern="s3://test-bucket/path",
+        )
+        saved_query.save()
+
+        endpoint = create_endpoint_with_version(
+            name=name,
+            team=self.team,
+            query=query,
+            created_by=self.user,
+            is_active=True,
+        )
+        version = endpoint.versions.first()
+        version.saved_query = saved_query
+        version.save()
+        return endpoint
+
+    def test_hogql_endpoint_empty_string_in_breakdown_value_column_not_rewritten(self):
+        """A HogQL endpoint that happens to emit a column named breakdown_value must not have
+        plain empty strings rewritten to null — that rewrite is an insight-materialization artifact."""
+        endpoint = create_endpoint_with_version(
+            name="hogql-breakdown-col",
+            team=self.team,
+            query={"kind": "HogQLQuery", "query": "SELECT '' AS breakdown_value, 'x' AS other"},
+            created_by=self.user,
+            is_active=True,
+        )
+
+        response = self.client.post(
+            f"/api/environments/{self.team.id}/endpoints/{endpoint.name}/run/",
+            {"refresh": "force"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.json())
+        results = response.json()["results"]
+        self.assertEqual(results[0][0], "", "plain empty string was rewritten to null for a HogQL endpoint")
+
+    def test_breakdown_limit_exceeded_emits_signal(self):
+        """When the Other bucket appears (breakdown limit exceeded), a signal should fire."""
+        for event_name in [f"event_{i}" for i in range(30)]:
+            _create_event(
+                event="$pageview",
+                distinct_id="user1",
+                team=self.team,
+                timestamp="2026-01-05 12:00:00",
+                properties={"unique_prop": event_name},
+            )
+        flush_persons_and_events()
+
+        endpoint = create_endpoint_with_version(
+            name="limit-signal",
+            team=self.team,
+            query=TrendsQuery(
+                series=[EventsNode(event="$pageview")],
+                dateRange={"date_from": "2026-01-01", "date_to": "2026-01-10"},
+                breakdownFilter={"breakdown": "unique_prop", "breakdown_type": "event", "breakdown_limit": 5},
+            ).model_dump(),
+            created_by=self.user,
+            is_active=True,
+        )
+
+        with (
+            mock.patch("products.endpoints.backend.materialization_transforms.ENDPOINT_BREAKDOWN_LIMIT", 5),
+            mock.patch("products.signals.backend.facade.api.emit_signal", new_callable=mock.AsyncMock) as mock_emit,
+        ):
+            response = self.client.post(
+                f"/api/environments/{self.team.id}/endpoints/{endpoint.name}/run/",
+                {"refresh": "force"},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        breakdown_signal_calls = [
+            c for c in mock_emit.call_args_list if c.kwargs.get("source_type") == "endpoint_breakdown_limit_exceeded"
+        ]
+        self.assertEqual(len(breakdown_signal_calls), 1, "expected a breakdown-limit-exceeded signal")
+
+    def test_materialized_failure_falls_back_to_inline(self):
+        """A materialized execution failure must fall back to inline execution, not 500."""
+        endpoint = self._make_fresh_materialized_endpoint(
+            "mat-fallback", {"kind": "HogQLQuery", "query": "SELECT count() FROM events"}
+        )
+
+        inline_response = Response({"results": [[1]], "columns": ["count()"]})
+        with mock.patch.object(
+            EndpointExecutionService,
+            "_execute_query_and_respond",
+            side_effect=[RuntimeError("materialized table exploded"), inline_response],
+        ) as mock_exec:
+            response = self.client.post(
+                f"/api/environments/{self.team.id}/endpoints/{endpoint.name}/run/", {}, format="json"
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(mock_exec.call_count, 2, "expected materialized attempt then inline fallback")
+
+    def test_series_mismatch_falls_back_to_inline(self):
+        """Series drift triggers re-materialization AND serves the request inline."""
+        from products.endpoints.backend.insight_transformers import MaterializedSeriesMismatchError
+        from products.endpoints.backend.services.strategies import InsightEndpointStrategy
+
+        endpoint = self._make_fresh_materialized_endpoint(
+            "mismatch-fallback",
+            TrendsQuery(
+                series=[EventsNode(event="$pageview")],
+                dateRange={"date_from": "2026-01-01", "date_to": "2026-01-10"},
+            ).model_dump(),
+        )
+
+        flat_response = Response({"results": [[0, "2026-01-01", 0]], "columns": ["__series_index", "day", "count"]})
+        inline_response = Response({"results": [{"label": "$pageview", "count": 0}]})
+        with (
+            mock.patch.object(
+                EndpointExecutionService,
+                "_execute_query_and_respond",
+                side_effect=[flat_response, inline_response],
+            ) as mock_exec,
+            mock.patch.object(
+                InsightEndpointStrategy,
+                "transform_materialized_response",
+                side_effect=MaterializedSeriesMismatchError("series drift"),
+            ),
+            mock.patch("products.endpoints.backend.services.execution.trigger_saved_query_schedule") as mock_trigger,
+        ):
+            response = self.client.post(
+                f"/api/environments/{self.team.id}/endpoints/{endpoint.name}/run/", {}, format="json"
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        mock_trigger.assert_called_once()
+        self.assertEqual(mock_exec.call_count, 2, "expected materialized attempt then inline fallback")
+
+    def test_emit_failure_signal_reaches_workflow_boundary(self):
+        """The failure-signal plumbing must make it to the Temporal boundary when the
+        org/source gates allow it — anything raising before that is a plumbing bug."""
+        from products.endpoints.backend.services.execution import _emit_endpoint_failure_signal
+        from products.signals.backend.models import SignalSourceConfig
+
+        self.organization.is_ai_data_processing_approved = True
+        self.organization.save()
+        endpoint = create_endpoint_with_version(
+            name="signal-boundary",
+            team=self.team,
+            query={"kind": "HogQLQuery", "query": "SELECT 1"},
+            created_by=self.user,
+            is_active=True,
+        )
+
+        mock_client = mock.AsyncMock()
+        with (
+            mock.patch(
+                "products.signals.backend.facade.api.async_connect",
+                new=mock.AsyncMock(return_value=mock_client),
+            ),
+            # The gate runs on a separate DB connection (thread_sensitive=False) and can't see
+            # rows from the test transaction, so patch it rather than creating a config row.
+            mock.patch.object(SignalSourceConfig, "is_source_enabled", return_value=True),
+        ):
+            _emit_endpoint_failure_signal(self.team, endpoint, RuntimeError("boom"), materialized=False, version=1)
+
+        self.assertGreaterEqual(mock_client.start_workflow.await_count, 1, "signal never reached the Temporal boundary")

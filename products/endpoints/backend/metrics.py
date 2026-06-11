@@ -40,6 +40,8 @@ ENDPOINT_RATE_LIMITED_TOTAL = Counter(
 ENDPOINT_CONCURRENCY_REJECTED_TOTAL = Counter(
     "posthog_endpoint_concurrency_rejected_total",
     "Endpoint executions rejected because the concurrency limit was exceeded",
+    # team_id is safe cardinality here: only teams actually hitting concurrency limits appear
+    labelnames=["team_id"],
 )
 
 ENDPOINT_CACHE_RESULT_TOTAL = Counter(
@@ -61,8 +63,8 @@ ENDPOINT_VALIDATION_ERROR_TOTAL = Counter(
     labelnames=["reason"],
 )
 
-ENDPOINT_MATERIALIZED_AGE_SECONDS = Histogram(
-    "posthog_endpoint_materialized_age_seconds",
-    "Age of the materialized data served, observed when a materialized table is used",
-    buckets=(60, 300, 1800, 3600, 21600, 43200, 86400, 172800, 259200, 604800, 2592000, float("inf")),
+ENDPOINT_MATERIALIZED_FRESHNESS_RATIO = Histogram(
+    "posthog_endpoint_materialized_freshness_ratio",
+    "Age of the served materialized data relative to its data_freshness_seconds target; >1.0 means behind SLA",
+    buckets=(0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0, 1.1, 1.25, 1.5, 2, 5, 10, float("inf")),
 )

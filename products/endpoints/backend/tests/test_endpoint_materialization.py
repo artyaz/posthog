@@ -24,7 +24,7 @@ from posthog.sync import database_sync_to_async
 from products.data_modeling.backend.models.datawarehouse_saved_query import DataWarehouseSavedQuery
 from products.data_modeling.backend.models.modeling import DataWarehouseModelPath
 from products.data_warehouse.backend.data_load.saved_query_service import get_saved_query_schedule
-from products.endpoints.backend.materialization import build_endpoint_hogql
+from products.endpoints.backend.materialization_transforms import build_endpoint_hogql
 from products.endpoints.backend.models import EndpointVersion
 from products.endpoints.backend.services.execution import EndpointExecutionService
 from products.endpoints.backend.services.materialization import (
@@ -1409,7 +1409,8 @@ class TestEndpointMaterialization(ClickhouseTestMixin, APIBaseTest):
                 format="json",
             )
 
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        # Unexpected internal failures surface as a server error, not a request error
+        self.assertEqual(response.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     def test_materialized_relative_date_range_advances_on_refresh(self):
         _create_event(team=self.team, event="$pageview", distinct_id="u1")
@@ -1600,3 +1601,110 @@ class TestEndpointMaterializationTemporal:
         schedule = await sync_to_async(get_saved_query_schedule)(saved_query)
         assert len(schedule.spec.calendars) == 1
         assert schedule.spec.jitter == timedelta(hours=1)
+
+
+class TestMaterializationReviewFixes(APIBaseTest):
+    """Regression tests for PR #62705 review findings."""
+
+    def setUp(self):
+        super().setUp()
+        self.sample_hogql_query = {
+            "kind": "HogQLQuery",
+            "query": "SELECT event, distinct_id FROM events WHERE event = '$pageview' LIMIT 100",
+        }
+        self.sync_workflow_patcher = mock.patch(
+            "products.data_warehouse.backend.data_load.saved_query_service.sync_saved_query_workflow"
+        )
+        self.workflow_exists_patcher = mock.patch(
+            "products.data_warehouse.backend.data_load.saved_query_service.saved_query_workflow_exists",
+            return_value=False,
+        )
+        self.delete_schedule_patcher = mock.patch(
+            "products.data_warehouse.backend.data_load.saved_query_service.delete_saved_query_schedule"
+        )
+        self.sync_workflow_patcher.start()
+        self.workflow_exists_patcher.start()
+        self.delete_schedule_patcher.start()
+
+    def tearDown(self):
+        self.sync_workflow_patcher.stop()
+        self.workflow_exists_patcher.stop()
+        self.delete_schedule_patcher.stop()
+        super().tearDown()
+
+    def test_deactivating_one_version_keeps_current_version_materialization(self):
+        """PATCH ?version=N {is_active: false} must not touch the current version's materialization."""
+        endpoint = create_endpoint_with_version(
+            name="version-deactivate-endpoint",
+            team=self.team,
+            query=self.sample_hogql_query,
+            created_by=self.user,
+            is_active=True,
+        )
+
+        # Create v2 by changing the query
+        response = self.client.patch(
+            f"/api/environments/{self.team.id}/endpoints/{endpoint.name}/",
+            {"query": {"kind": "HogQLQuery", "query": "SELECT event FROM events LIMIT 5"}},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.json())
+
+        # Materialize v2 (the current version)
+        response = self.client.patch(
+            f"/api/environments/{self.team.id}/endpoints/{endpoint.name}/",
+            {"is_materialized": True},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.json())
+        v2 = endpoint.get_version(2)
+        self.assertIsNotNone(v2.saved_query)
+
+        # Deactivate v1 only
+        response = self.client.patch(
+            f"/api/environments/{self.team.id}/endpoints/{endpoint.name}/",
+            {"is_active": False, "version": 1},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.json())
+
+        v1 = endpoint.get_version(1)
+        self.assertFalse(v1.is_active)
+        endpoint.refresh_from_db()
+        self.assertTrue(endpoint.is_active)
+
+        # v2's materialization must be untouched
+        v2.refresh_from_db()
+        self.assertIsNotNone(v2.saved_query_id, "current version's materialization was disabled by mistake")
+        assert v2.saved_query is not None
+        self.assertFalse(v2.saved_query.deleted)
+
+    def test_enable_materialization_does_not_hijack_user_saved_query(self):
+        """A user-created saved query whose name collides with {endpoint}_v{n} must not be taken over."""
+        endpoint = create_endpoint_with_version(
+            name="hijack-target",
+            team=self.team,
+            query=self.sample_hogql_query,
+            created_by=self.user,
+            is_active=True,
+        )
+        user_query = {"kind": "HogQLQuery", "query": "SELECT 42 AS answer"}
+        user_saved_query = DataWarehouseSavedQuery.objects.create(
+            team=self.team,
+            name="hijack-target_v1",
+            query=user_query,
+        )
+
+        response = self.client.patch(
+            f"/api/environments/{self.team.id}/endpoints/{endpoint.name}/",
+            {"is_materialized": True},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST, response.json())
+
+        user_saved_query.refresh_from_db()
+        self.assertEqual(user_saved_query.query, user_query, "user's saved query was overwritten")
+        self.assertFalse(user_saved_query.is_materialized)
+        version = endpoint.get_version()
+        self.assertIsNone(version.saved_query_id)

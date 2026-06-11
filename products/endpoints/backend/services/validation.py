@@ -20,9 +20,13 @@ from posthog.hogql.parser import parse_select
 from posthog.exceptions_capture import capture_exception
 from posthog.models import Team
 
-from products.endpoints.backend.constants import ENDPOINT_NAME_REGEX, VALID_DATA_FRESHNESS_SECONDS
-from products.endpoints.backend.materialization import SUPPORTED_BUCKET_FUNCTIONS, VariablePlaceholderFinder
-from products.endpoints.backend.models import Endpoint
+from products.endpoints.backend.constants import (
+    DATA_FRESHNESS_BUCKET_SPECS,
+    ENDPOINT_NAME_REGEX,
+    VALID_DATA_FRESHNESS_SECONDS,
+)
+from products.endpoints.backend.materialization_transforms import SUPPORTED_BUCKET_FUNCTIONS, VariablePlaceholderFinder
+from products.endpoints.backend.models import Endpoint, can_materialize_query
 from products.product_analytics.backend.models.insight_variable import InsightVariable
 
 
@@ -32,13 +36,9 @@ def validate_data_freshness(data_freshness_seconds: int | None) -> None:
         return
     if data_freshness_seconds not in VALID_DATA_FRESHNESS_SECONDS:
         allowed = sorted(VALID_DATA_FRESHNESS_SECONDS)
+        human = ", ".join(b.human for b in DATA_FRESHNESS_BUCKET_SPECS)
         raise ValidationError(
-            {
-                "data_freshness_seconds": (
-                    f"Data freshness must be one of: {allowed} seconds "
-                    "(15 minutes, 30 minutes, 1 hour, 6 hours, 12 hours, 24 hours, 7 days)."
-                )
-            }
+            {"data_freshness_seconds": f"Data freshness must be one of: {allowed} seconds ({human})."}
         )
 
 
@@ -219,6 +219,17 @@ def validate_update_request(data: EndpointRequest, team: Team, endpoint: Endpoin
 
     if not will_be_active and data.is_materialized is True:
         raise ValidationError({"is_materialized": "Cannot enable materialization on inactive endpoint."})
+
+    if data.is_materialized is True:
+        # Fail fast on queries that can't be materialized. The service re-checks against
+        # the final version (the authoritative guard); this catches it before any writes.
+        effective_query = (
+            data.query.model_dump() if data.query is not None else (endpoint.get_version().query if endpoint else None)
+        )
+        if effective_query is not None:
+            can_materialize, reason = can_materialize_query(effective_query)
+            if not can_materialize:
+                raise ValidationError(f"Cannot materialize endpoint. Reason: {reason}")
 
     if data.query and isinstance(data.query, HogQLQuery) and data.query.query:
         sync_hogql_query_variables(data.query, team)

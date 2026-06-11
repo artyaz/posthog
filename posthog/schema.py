@@ -1653,6 +1653,14 @@ class EmptyPropertyFilter(BaseModel):
     type: Literal["empty"] = "empty"
 
 
+class EndpointBreakdownLimitExceededSignalExtra(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+    )
+    breakdown_limit: float
+    endpoint_name: str
+
+
 class EndpointExecutionFailedSignalExtra(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
@@ -4741,6 +4749,7 @@ class SignalSourceType(StrEnum):
     ISSUE_REOPENED = "issue_reopened"
     ISSUE_SPIKING = "issue_spiking"
     ENDPOINT_EXECUTION_FAILED = "endpoint_execution_failed"
+    ENDPOINT_BREAKDOWN_LIMIT_EXCEEDED = "endpoint_breakdown_limit_exceeded"
     CROSS_SOURCE_ISSUE = "cross_source_issue"
     ALERT_STATE_CHANGE = "alert_state_change"
 
@@ -7036,6 +7045,19 @@ class EmbeddingDistance(BaseModel):
     result: EmbeddingRecord
 
 
+class EndpointBreakdownLimitExceededSignalInput(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+    )
+    description: str
+    extra: EndpointBreakdownLimitExceededSignalExtra
+    remediation: SignalRemediation | None = None
+    source_id: str
+    source_product: Literal["endpoints"] = "endpoints"
+    source_type: Literal["endpoint_breakdown_limit_exceeded"] = "endpoint_breakdown_limit_exceeded"
+    weight: float
+
+
 class EndpointExecutionFailedSignalInput(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
@@ -9136,6 +9158,7 @@ class SignalInput(
         | ConversationsTicketSignalInput
         | ErrorTrackingSignalInput
         | EndpointExecutionFailedSignalInput
+        | EndpointBreakdownLimitExceededSignalInput
         | PgAnalyzeIssueSignalInput
         | SignalsScoutSignalInput
         | LogsAlertStateChangeSignalInput
@@ -9151,6 +9174,7 @@ class SignalInput(
         | ConversationsTicketSignalInput
         | ErrorTrackingSignalInput
         | EndpointExecutionFailedSignalInput
+        | EndpointBreakdownLimitExceededSignalInput
         | PgAnalyzeIssueSignalInput
         | SignalsScoutSignalInput
         | LogsAlertStateChangeSignalInput

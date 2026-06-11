@@ -9,9 +9,11 @@ the result.
 import dataclasses
 from typing import Union, cast
 
+from django.db import transaction
+
 import structlog
 from loginas.utils import is_impersonated_session
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import APIException, ValidationError
 from rest_framework.request import Request
 
 from posthog.schema import EndpointRequest, HogQLQuery
@@ -51,7 +53,7 @@ class EndpointUpdateResult:
     """Outcome of an update, with everything the viewset needs to build the response."""
 
     endpoint: Endpoint
-    target_version: EndpointVersion | None
+    target_version: EndpointVersion
     version_targeted: bool
     materialization_error: str | None = None
 
@@ -88,33 +90,42 @@ class EndpointCrudService:
 
         try:
             query_dict = cast(Union[HogQLQuery, InsightQueryNode], data.query).model_dump()
-            endpoint = Endpoint.objects.create(
-                team=self.team,
-                created_by=self.user,
-                name=cast(str, data.name),  # verified in validate_endpoint_request
-                is_active=data.is_active if data.is_active is not None else True,
-                current_version=1,
-                derived_from_insight=data.derived_from_insight,
-            )
 
+            # Column extraction hits ClickHouse — do it outside the transaction.
             try:
                 columns: list[dict] | None = EndpointVersion.extract_columns(query_dict, team_id=self.team.pk)
-            except Exception:
+            except Exception as e:
+                capture_exception(
+                    e,
+                    {"product": Product.ENDPOINTS, "team_id": self.team.pk, "endpoint_name": data.name},
+                )
                 columns = None
-            EndpointVersion.objects.create(
-                endpoint=endpoint,
-                team=self.team,
-                version=1,
-                query=query_dict,
-                description=data.description or "",
-                data_freshness_seconds=(
-                    data.data_freshness_seconds
-                    if data.data_freshness_seconds is not None
-                    else DEFAULT_DATA_FRESHNESS_SECONDS
-                ),
-                created_by=self.user,
-                columns=columns,
-            )
+
+            # The endpoint and its initial version must exist together — a version-less
+            # endpoint can't run and would squat on the name.
+            with transaction.atomic():
+                endpoint = Endpoint.objects.create(
+                    team=self.team,
+                    created_by=self.user,
+                    name=cast(str, data.name),  # verified in validate_endpoint_request
+                    is_active=data.is_active if data.is_active is not None else True,
+                    current_version=1,
+                    derived_from_insight=data.derived_from_insight,
+                )
+                EndpointVersion.objects.create(
+                    endpoint=endpoint,
+                    team=self.team,
+                    version=1,
+                    query=query_dict,
+                    description=data.description or "",
+                    data_freshness_seconds=(
+                        data.data_freshness_seconds
+                        if data.data_freshness_seconds is not None
+                        else DEFAULT_DATA_FRESHNESS_SECONDS
+                    ),
+                    created_by=self.user,
+                    columns=columns,
+                )
 
             apply_tags(endpoint, data.tags)
 
@@ -139,6 +150,8 @@ class EndpointCrudService:
 
             return endpoint
 
+        except ValidationError:
+            raise
         except Exception as e:
             capture_exception(
                 e,
@@ -169,197 +182,60 @@ class EndpointCrudService:
         """
         endpoint_before_update = Endpoint.objects.get(pk=endpoint.id)
 
-        target_version_override = None
-        if version_number is not None:
-            try:
-                target_version_override = endpoint.get_version(version_number)
-            except EndpointVersion.DoesNotExist:
-                raise ValidationError({"version": f"Version {version_number} not found for this endpoint."})
-            if data.query is not None:
-                raise ValidationError(
-                    {
-                        "query": "Cannot change query when targeting a specific version. Query changes create a new version."
-                    }
-                )
+        target_version_override = self._resolve_target_version_override(endpoint, data, version_number)
+        version_targeted = target_version_override is not None
 
+        step = "start"
         try:
             current_version = endpoint.get_version()
+            # get_version raises when no versions exist, so target_version is never None.
             target_version = target_version_override or current_version
-
-            version_before_update = EndpointVersion.objects.get(pk=target_version.pk) if target_version else None
-            version_was_created = False
-            query_changed = False
-            new_query_dict = None
-            if data.query is not None:
-                new_query_dict = data.query.model_dump()
-                query_changed = endpoint.has_query_changed(new_query_dict)
-
-            # Deactivates the whole endpoint - we deactivate a version later if requested
-            if data.is_active is not None and target_version_override is None:
-                endpoint.is_active = data.is_active
-            endpoint.save()
-
-            final_is_active = data.is_active if data.is_active is not None else endpoint.is_active
+            version_before_update = EndpointVersion.objects.get(pk=target_version.pk)
             was_materialized = current_version.saved_query_id is not None
 
-            # Step 1: Handle deactivation (disables materialization, prevents any materialization operations)
-            if not final_is_active and was_materialized:
+            step = "endpoint_activation"
+            # Endpoint-level activation only — deactivating a single version must never
+            # touch the endpoint or the current version's materialization.
+            if data.is_active is not None and not version_targeted:
+                endpoint.is_active = data.is_active
+            endpoint.save()
+            if not version_targeted and not endpoint.is_active and was_materialized:
                 self.materialization.disable_materialization(endpoint, current_version)
 
-            # Step 2: Handle query changes and versioning (independent of active/materialization state)
-            old_bucket_overrides: dict[str, str] | None = None
-            if query_changed and new_query_dict is not None:
-                if was_materialized:
-                    old_bucket_overrides = current_version.bucket_overrides
+            step = "versioning"
+            target_version, version_was_created, old_bucket_overrides = self._apply_query_change(
+                endpoint, data, target_version, was_materialized
+            )
 
-                new_version = endpoint.create_new_version(query=new_query_dict, user=self.user)
-                version_was_created = True
-                current_version = new_version
-                target_version = new_version
+            step = "version_fields"
+            self._apply_version_field_updates(target_version, data, raw_data, version_targeted)
 
-            # Step 3: Update version-level fields on target version
-            if target_version:
-                update_fields = []
-                if data.description is not None:
-                    target_version.description = data.description
-                    update_fields.append("description")
-                if "data_freshness_seconds" in raw_data:
-                    target_version.data_freshness_seconds = (
-                        data.data_freshness_seconds
-                        if data.data_freshness_seconds is not None
-                        else DEFAULT_DATA_FRESHNESS_SECONDS
-                    )
-                    update_fields.append("data_freshness_seconds")
-                # When targeting a specific version, is_active updates the version
-                if data.is_active is not None and target_version_override is not None:
-                    target_version.is_active = data.is_active
-                    update_fields.append("is_active")
-                if update_fields:
-                    update_fields.append("updated_at")
-                    target_version.save(update_fields=update_fields)
+            step = "materialization"
+            materialization_error = self._reconcile_materialization(
+                endpoint,
+                data,
+                raw_data,
+                target_version,
+                version_targeted,
+                was_materialized=was_materialized,
+                version_was_created=version_was_created,
+                old_bucket_overrides=old_bucket_overrides,
+            )
 
-            # Step 4: Handle materialization state (only if endpoint should be active)
-            stored_bucket_overrides = target_version.bucket_overrides if target_version else None
-            materialization_error: str | None = None
-            if final_is_active and target_version:
-                # When targeting a specific version, check that version's materialization state
-                # Otherwise use was_materialized (state before this update) to support materialization transfer
-                if target_version_override is not None:
-                    check_was_materialized = target_version.saved_query_id is not None
-                else:
-                    check_was_materialized = was_materialized
-
-                should_enable = data.is_materialized is True or (
-                    data.is_materialized is None and check_was_materialized
-                )
-                should_disable = data.is_materialized is False
-
-                if should_enable:
-                    bucket_overrides = raw_data.get("bucket_overrides")
-                    if bucket_overrides is None and version_was_created:
-                        bucket_overrides = old_bucket_overrides
-                    validate_bucket_overrides(bucket_overrides)
-                    try:
-                        self.materialization.enable_materialization(
-                            endpoint,
-                            target_version.data_freshness_seconds,
-                            target_version,
-                            bucket_overrides=bucket_overrides,
-                        )
-                        # Trigger immediate refresh when bucket_overrides changed
-                        if (
-                            bucket_overrides is not None
-                            and bucket_overrides != stored_bucket_overrides
-                            and target_version.saved_query is not None
-                        ):
-                            try:
-                                trigger_saved_query_schedule(target_version.saved_query)
-                            except Exception:
-                                logger.warning(
-                                    "failed_to_trigger_materialization_refresh",
-                                    team_id=self.team.pk,
-                                    saved_query_id=str(target_version.saved_query_id),
-                                )
-                    except Exception as e:
-                        if version_was_created:
-                            # The new version was already committed — don't fail the whole update.
-                            # Materialization can be retried via a subsequent update.
-                            materialization_error = str(e)
-                            logger.exception(
-                                "Materialization failed after version creation",
-                                endpoint_name=endpoint.name,
-                                version=target_version.version,
-                            )
-                            capture_exception(
-                                e,
-                                {
-                                    "product": Product.ENDPOINTS,
-                                    "team_id": self.team.pk,
-                                    "endpoint_name": endpoint.name,
-                                    "version": target_version.version,
-                                },
-                            )
-                        else:
-                            raise
-                elif should_disable:
-                    self.materialization.disable_materialization(endpoint, target_version)
-
+            step = "tags_and_activity"
             apply_tags(endpoint, data.tags)
-
-            endpoint_changes = changes_between("Endpoint", previous=endpoint_before_update, current=endpoint)
-            if endpoint_changes:
-                # endpoint-level activity
-                self._log_activity(
-                    item_id=str(endpoint.id),
-                    scope="Endpoint",
-                    activity="updated",
-                    detail=Detail(name=endpoint.name, changes=endpoint_changes),
-                )
-
-            # version-level activity
-            if version_was_created:
-                query_change = Change(
-                    type="EndpointVersion",
-                    action="changed",
-                    field="query",
-                    before=version_before_update.query if version_before_update else None,
-                    after=target_version.query,
-                )
-                self._log_activity(
-                    item_id=str(endpoint.id),
-                    scope="Endpoint",
-                    activity="version_created",
-                    detail=Detail(
-                        name=endpoint.name,
-                        changes=[query_change],
-                        context=EndpointContext(version=target_version.version),
-                    ),
-                )
-            elif target_version and version_before_update:
-                version_changes = changes_between(
-                    "EndpointVersion", previous=version_before_update, current=target_version
-                )
-
-                if version_changes:
-                    self._log_activity(
-                        item_id=str(endpoint.id),
-                        scope="EndpointVersion",
-                        activity="version_updated",
-                        detail=Detail(
-                            name=endpoint.name,
-                            changes=version_changes,
-                            context=EndpointContext(version=target_version.version),
-                        ),
-                    )
+            self._log_update_activity(
+                endpoint, endpoint_before_update, target_version, version_before_update, version_was_created
+            )
 
             return EndpointUpdateResult(
                 endpoint=endpoint,
                 target_version=target_version,
-                version_targeted=target_version_override is not None,
+                version_targeted=version_targeted,
                 materialization_error=materialization_error,
             )
 
-        except ValidationError:
+        except APIException:
             raise
         except Exception as e:
             current_version = endpoint.get_version()
@@ -370,9 +246,210 @@ class EndpointCrudService:
                     "team_id": self.team.pk,
                     "endpoint_id": endpoint.id,
                     "saved_query_id": current_version.saved_query.id if current_version.saved_query else None,
+                    "update_step": step,
                 },
             )
             raise ValidationError("Failed to update endpoint.")
+
+    def _resolve_target_version_override(
+        self, endpoint: Endpoint, data: EndpointRequest, version_number: int | None
+    ) -> EndpointVersion | None:
+        if version_number is None:
+            return None
+        try:
+            target_version_override = endpoint.get_version(version_number)
+        except EndpointVersion.DoesNotExist:
+            raise ValidationError({"version": f"Version {version_number} not found for this endpoint."})
+        if data.query is not None:
+            raise ValidationError(
+                {"query": "Cannot change query when targeting a specific version. Query changes create a new version."}
+            )
+        return target_version_override
+
+    def _apply_query_change(
+        self,
+        endpoint: Endpoint,
+        data: EndpointRequest,
+        target_version: EndpointVersion,
+        was_materialized: bool,
+    ) -> tuple[EndpointVersion, bool, dict[str, str] | None]:
+        """Create a new version when the query changed. Returns (target_version, created, old_bucket_overrides)."""
+        if data.query is None:
+            return target_version, False, None
+
+        new_query_dict = data.query.model_dump()
+        if not endpoint.has_query_changed(new_query_dict):
+            return target_version, False, None
+
+        # Preserve bucketing across the version bump so materialization transfers cleanly.
+        old_bucket_overrides = target_version.bucket_overrides if was_materialized else None
+        new_version = endpoint.create_new_version(query=new_query_dict, user=self.user)
+        return new_version, True, old_bucket_overrides
+
+    def _apply_version_field_updates(
+        self,
+        target_version: EndpointVersion,
+        data: EndpointRequest,
+        raw_data: dict,
+        version_targeted: bool,
+    ) -> None:
+        update_fields = []
+        if data.description is not None:
+            target_version.description = data.description
+            update_fields.append("description")
+        if "data_freshness_seconds" in raw_data:
+            target_version.data_freshness_seconds = (
+                data.data_freshness_seconds
+                if data.data_freshness_seconds is not None
+                else DEFAULT_DATA_FRESHNESS_SECONDS
+            )
+            update_fields.append("data_freshness_seconds")
+        # When targeting a specific version, is_active updates the version
+        if data.is_active is not None and version_targeted:
+            target_version.is_active = data.is_active
+            update_fields.append("is_active")
+        if update_fields:
+            update_fields.append("updated_at")
+            target_version.save(update_fields=update_fields)
+
+    def _reconcile_materialization(
+        self,
+        endpoint: Endpoint,
+        data: EndpointRequest,
+        raw_data: dict,
+        target_version: EndpointVersion,
+        version_targeted: bool,
+        *,
+        was_materialized: bool,
+        version_was_created: bool,
+        old_bucket_overrides: dict[str, str] | None,
+    ) -> str | None:
+        """Bring the target version's materialization in line with the request.
+
+        Returns a materialization error message when enabling failed after a new
+        version was already committed (the update itself still succeeds).
+        """
+        if not endpoint.is_active:
+            # Endpoint-level deactivation already tore down the current version's materialization.
+            return None
+
+        if version_targeted and not target_version.is_active:
+            # Deactivating a version: tear down its own materialization, never enable.
+            if target_version.saved_query_id is not None:
+                self.materialization.disable_materialization(endpoint, target_version)
+            return None
+
+        # When targeting a specific version, check that version's materialization state.
+        # Otherwise use the pre-update state so materialization transfers across a version bump.
+        check_was_materialized = target_version.saved_query_id is not None if version_targeted else was_materialized
+
+        should_enable = data.is_materialized is True or (data.is_materialized is None and check_was_materialized)
+        if data.is_materialized is False:
+            self.materialization.disable_materialization(endpoint, target_version)
+            return None
+        if not should_enable:
+            return None
+
+        bucket_overrides = raw_data.get("bucket_overrides")
+        if bucket_overrides is None and version_was_created:
+            bucket_overrides = old_bucket_overrides
+        validate_bucket_overrides(bucket_overrides)
+        stored_bucket_overrides = target_version.bucket_overrides
+
+        try:
+            self.materialization.enable_materialization(
+                endpoint,
+                target_version,
+                target_version.data_freshness_seconds,
+                bucket_overrides=bucket_overrides,
+            )
+            if (
+                bucket_overrides is not None
+                and bucket_overrides != stored_bucket_overrides
+                and target_version.saved_query is not None
+            ):
+                # enable only triggers an immediate Temporal run when it creates the schedule;
+                # changed bucketing on an existing materialization needs an explicit refresh.
+                try:
+                    trigger_saved_query_schedule(target_version.saved_query)
+                except Exception:
+                    logger.warning(
+                        "failed_to_trigger_materialization_refresh",
+                        team_id=self.team.pk,
+                        endpoint_name=endpoint.name,
+                        saved_query_id=str(target_version.saved_query_id),
+                        bucket_overrides=bucket_overrides,
+                    )
+        except Exception as e:
+            if not version_was_created:
+                raise
+            # The new version was already committed — don't fail the whole update.
+            # Materialization can be retried via a subsequent update.
+            logger.exception(
+                "Materialization failed after version creation",
+                endpoint_name=endpoint.name,
+                version=target_version.version,
+            )
+            capture_exception(
+                e,
+                {
+                    "product": Product.ENDPOINTS,
+                    "team_id": self.team.pk,
+                    "endpoint_name": endpoint.name,
+                    "version": target_version.version,
+                },
+            )
+            return str(e)
+        return None
+
+    def _log_update_activity(
+        self,
+        endpoint: Endpoint,
+        endpoint_before_update: Endpoint,
+        target_version: EndpointVersion,
+        version_before_update: EndpointVersion,
+        version_was_created: bool,
+    ) -> None:
+        endpoint_changes = changes_between("Endpoint", previous=endpoint_before_update, current=endpoint)
+        if endpoint_changes:
+            self._log_activity(
+                item_id=str(endpoint.id),
+                scope="Endpoint",
+                activity="updated",
+                detail=Detail(name=endpoint.name, changes=endpoint_changes),
+            )
+
+        if version_was_created:
+            query_change = Change(
+                type="EndpointVersion",
+                action="changed",
+                field="query",
+                before=version_before_update.query,
+                after=target_version.query,
+            )
+            self._log_activity(
+                item_id=str(endpoint.id),
+                scope="Endpoint",
+                activity="version_created",
+                detail=Detail(
+                    name=endpoint.name,
+                    changes=[query_change],
+                    context=EndpointContext(version=target_version.version),
+                ),
+            )
+        else:
+            version_changes = changes_between("EndpointVersion", previous=version_before_update, current=target_version)
+            if version_changes:
+                self._log_activity(
+                    item_id=str(endpoint.id),
+                    scope="EndpointVersion",
+                    activity="version_updated",
+                    detail=Detail(
+                        name=endpoint.name,
+                        changes=version_changes,
+                        context=EndpointContext(version=target_version.version),
+                    ),
+                )
 
     # ------------------------------------------------------------------
     # Destroy
@@ -383,6 +460,8 @@ class EndpointCrudService:
         endpoint_id = str(endpoint.id)
         endpoint_name = endpoint.name
 
+        # DAG cleanup only — the saved queries themselves are reverted and soft-deleted
+        # by endpoint.soft_delete() via version.disable_materialization().
         for version in endpoint.versions.filter(saved_query__isnull=False):
             try:
                 if version.saved_query:
@@ -404,6 +483,7 @@ class EndpointCrudService:
                 )
 
         endpoint.soft_delete()
+        # Single endpoint-level cache key covers all versions.
         clear_endpoint_materialization_cache(self.team.pk, endpoint.name)
         self._log_activity(
             item_id=endpoint_id,

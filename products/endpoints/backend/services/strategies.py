@@ -19,6 +19,7 @@ from functools import cached_property
 from typing import TYPE_CHECKING, ClassVar, Optional
 
 import structlog
+from asgiref.sync import async_to_sync
 from rest_framework.exceptions import ValidationError
 
 from posthog.schema import DashboardFilter, EndpointRunRequest, HogQLVariable, PropertyOperator
@@ -32,10 +33,12 @@ from posthog.hogql.visitor import CloningVisitor
 
 from posthog.clickhouse.query_tagging import Product
 from posthog.exceptions_capture import capture_exception
+from posthog.hogql_queries.insights.utils.breakdowns import BREAKDOWN_NULL_STRING_LABEL, BREAKDOWN_OTHER_STRING_LABEL
 from posthog.models.team import Team
 
 from products.endpoints.backend.insight_transformers import transform_materialized_insight_response
-from products.endpoints.backend.materialization import (
+from products.endpoints.backend.materialization_transforms import (
+    ENDPOINT_BREAKDOWN_LIMIT,
     MaterializableVariable,
     analyze_variables_for_materialization,
     prepare_insight_query_for_endpoint,
@@ -48,6 +51,9 @@ if TYPE_CHECKING:
     from products.data_modeling.backend.models.datawarehouse_saved_query import DataWarehouseSavedQuery
 
 logger = structlog.get_logger(__name__)
+
+# Query types that support user-configurable breakdown filtering
+BREAKDOWN_SUPPORTED_QUERY_TYPES: frozenset[str] = frozenset({"TrendsQuery", "RetentionQuery"})
 
 
 # ---------------------------------------------------------------------------
@@ -152,7 +158,7 @@ def build_breakdown_filter_condition(query_kind: str | None, value: str, array_i
     - 0: single breakdown — use has() on the full array
     - 1+: multiple breakdowns — use equality on breakdown_value[N]
     """
-    if query_kind not in ("TrendsQuery", "RetentionQuery"):
+    if query_kind not in BREAKDOWN_SUPPORTED_QUERY_TYPES:
         logger.warning(
             "Query type does not support breakdown filtering",
             query_kind=query_kind,
@@ -173,6 +179,122 @@ def build_breakdown_filter_condition(query_kind: str | None, value: str, array_i
         name="has",
         args=[ast.Field(chain=["breakdown_value"]), ast.Constant(value=value)],
     )
+
+
+# ---------------------------------------------------------------------------
+# Breakdown sentinel cleaning (response post-processing)
+# ---------------------------------------------------------------------------
+
+
+def _value_contains_other(value: object, other_label: str) -> bool:
+    """Check if a breakdown value contains the 'Other' sentinel."""
+    if isinstance(value, str):
+        return value == other_label
+    if isinstance(value, list):
+        return any(item == other_label for item in value if isinstance(item, str))
+    return False
+
+
+def _clean_sentinel_value(value: object, clean_empty_string: bool) -> object:
+    """Clean breakdown sentinel strings (null and other) in a value or list of values."""
+    if isinstance(value, str):
+        if value == BREAKDOWN_NULL_STRING_LABEL or (clean_empty_string and value == ""):
+            return None
+        if value == BREAKDOWN_OTHER_STRING_LABEL:
+            return "Other"
+    elif isinstance(value, list):
+        return [_clean_sentinel_value(item, clean_empty_string) for item in value]
+    return value
+
+
+def _clean_sentinel_label(label: object) -> object:
+    """Clean a label string containing ::-joined breakdown parts."""
+    if not isinstance(label, str):
+        return label
+    if BREAKDOWN_NULL_STRING_LABEL not in label and BREAKDOWN_OTHER_STRING_LABEL not in label:
+        return label
+    parts = label.split("::")
+    cleaned = [
+        "null" if p == BREAKDOWN_NULL_STRING_LABEL else "Other" if p == BREAKDOWN_OTHER_STRING_LABEL else p
+        for p in parts
+    ]
+    return "::".join(cleaned)
+
+
+def clean_breakdown_sentinels(result: dict, clean_empty_string: bool) -> bool:
+    """Replace breakdown sentinel strings in API response results in-place.
+
+    Handles both list-of-lists (materialized/HogQL) and list-of-dicts (inline insight).
+    ``clean_empty_string`` additionally rewrites plain '' to null — that's how null
+    breakdown values are stored in materialized insight tables, but it must NOT be
+    applied to arbitrary HogQL results where '' is a legitimate value.
+
+    Returns True if the "Other" sentinel was found — meaning the breakdown_limit
+    was exceeded; the caller decides how to report that.
+    """
+    rows = result.get("results")
+    if not rows:
+        return False
+
+    found_other = False
+    columns = result.get("columns")
+    if columns:
+        # HogQL/materialized path: results are list[tuple] or list[list]
+        indices = [i for i, col in enumerate(columns) if col == "breakdown_value"]
+        if not indices:
+            return False
+        for row_idx, row in enumerate(rows):
+            needs_clean = any(isinstance(row[i], (str, list)) or row[i] is None for i in indices)
+            if not needs_clean:
+                continue
+            if not found_other:
+                found_other = any(_value_contains_other(row[i], BREAKDOWN_OTHER_STRING_LABEL) for i in indices)
+            row_list = list(row)
+            for i in indices:
+                row_list[i] = _clean_sentinel_value(row_list[i], clean_empty_string)
+            rows[row_idx] = type(row)(row_list)
+    elif isinstance(rows[0], dict):
+        # Inline insight path: results are list[dict]
+        for row in rows:
+            if "breakdown_value" in row:
+                if not found_other:
+                    found_other = _value_contains_other(row["breakdown_value"], BREAKDOWN_OTHER_STRING_LABEL)
+                row["breakdown_value"] = _clean_sentinel_value(row["breakdown_value"], clean_empty_string)
+            if "label" in row:
+                if not found_other and isinstance(row["label"], str):
+                    found_other = BREAKDOWN_OTHER_STRING_LABEL in row["label"]
+                row["label"] = _clean_sentinel_label(row["label"])
+
+    return found_other
+
+
+def _emit_breakdown_limit_signal(team: Team, endpoint: Endpoint) -> None:
+    """Fire a Signal when the breakdown limit was exceeded ('Other' bucket in results).
+
+    Fails silently — signal emission must never break the response.
+    """
+    from products.signals.backend.facade.api import emit_signal
+
+    try:
+        async_to_sync(emit_signal)(
+            team=team,
+            source_product="endpoints",
+            source_type="endpoint_breakdown_limit_exceeded",
+            source_id=f"{team.id}:{endpoint.name}",
+            description=(
+                f"Endpoint '{endpoint.name}' exceeded the breakdown limit ({ENDPOINT_BREAKDOWN_LIMIT}) — "
+                f"an 'Other' bucket appeared in its results, so callers are seeing aggregated values "
+                f"for the long tail instead of per-value rows. Consider a lower-cardinality breakdown "
+                f"property or filtering the query.\nEndpoint path: {endpoint.endpoint_path}"
+            ),
+            weight=0.4,
+            extra={
+                "endpoint_name": endpoint.name,
+                "breakdown_limit": ENDPOINT_BREAKDOWN_LIMIT,
+            },
+        )
+    except Exception:
+        logger.exception("Failed to emit breakdown-limit signal", endpoint_name=endpoint.name, team_id=team.id)
 
 
 # ---------------------------------------------------------------------------
@@ -252,6 +374,10 @@ class EndpointQueryStrategy(abc.ABC):
     @abc.abstractmethod
     def transform_materialized_response(self, response_data: dict, saved_query: "DataWarehouseSavedQuery") -> None:
         """Re-shape a materialized read into the inline response format."""
+
+    @abc.abstractmethod
+    def clean_response_sentinels(self, response_data: dict) -> None:
+        """Rewrite internal breakdown sentinel strings in the response, in place."""
 
     # --- inline execution ---
 
@@ -388,6 +514,10 @@ class HogQLEndpointStrategy(EndpointQueryStrategy):
         """HogQL materialized rows are flat and returned as-is — no re-shaping needed."""
         return None
 
+    def clean_response_sentinels(self, response_data: dict) -> None:
+        """Clean sentinel literals only — plain '' is a legitimate HogQL value and stays."""
+        clean_breakdown_sentinels(response_data, clean_empty_string=False)
+
     def apply_materialized_filters(
         self, select_query: ast.SelectQuery, data: EndpointRunRequest
     ) -> dict[str, str] | None:
@@ -468,8 +598,7 @@ class InsightEndpointStrategy(EndpointQueryStrategy):
     insight response format.
     """
 
-    # Query types that support user-configurable breakdown filtering
-    BREAKDOWN_SUPPORTED_QUERY_TYPES: ClassVar[set[str]] = {"TrendsQuery", "RetentionQuery"}
+    BREAKDOWN_SUPPORTED_QUERY_TYPES: ClassVar[frozenset[str]] = BREAKDOWN_SUPPORTED_QUERY_TYPES
     # Query types with a materialized-response transformer
     INSIGHT_TRANSFORM_TYPES: ClassVar[set[str]] = {"TrendsQuery", "LifecycleQuery", "RetentionQuery"}
 
@@ -554,6 +683,19 @@ class InsightEndpointStrategy(EndpointQueryStrategy):
             self.team,
             now=saved_query.last_run_at,
         )
+
+    def clean_response_sentinels(self, response_data: dict) -> None:
+        """Full cleaning: sentinel literals plus '' → null (how materialized insight
+        tables store null breakdowns). An 'Other' bucket means the breakdown limit
+        was exceeded — report it for visibility."""
+        found_other = clean_breakdown_sentinels(response_data, clean_empty_string=True)
+        if found_other:
+            capture_exception(
+                Exception(
+                    f"Endpoint breakdown limit ({ENDPOINT_BREAKDOWN_LIMIT}) exceeded — 'Other' bucket appeared in results"
+                )
+            )
+            _emit_breakdown_limit_signal(self.team, self.endpoint)
 
     def prepare_inline_query(self, query: dict) -> dict:
         return prepare_insight_query_for_endpoint(query)

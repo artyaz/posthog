@@ -12,7 +12,7 @@ import re
 import time
 import uuid
 from datetime import timedelta
-from typing import Union, cast
+from typing import Literal, Union
 
 from django.utils import timezone
 
@@ -22,6 +22,7 @@ from asgiref.sync import async_to_sync
 from dateutil.parser import isoparse
 from pydantic import BaseModel
 from rest_framework import status
+from rest_framework.authentication import SessionAuthentication
 from rest_framework.exceptions import Throttled, ValidationError
 from rest_framework.request import Request
 from rest_framework.response import Response
@@ -48,13 +49,11 @@ from posthog.ducklake.common import get_duckgres_server_for_organization
 from posthog.errors import ExposedCHQueryError
 from posthog.event_usage import get_request_analytics_properties, report_user_action
 from posthog.exceptions_capture import capture_exception
-from posthog.hogql_queries.insights.utils.breakdowns import BREAKDOWN_NULL_STRING_LABEL, BREAKDOWN_OTHER_STRING_LABEL
-from posthog.hogql_queries.query_runner import BLOCKING_EXECUTION_MODES
 from posthog.models import Team, User
 
+from products.data_modeling.backend.models.datawarehouse_saved_query import DataWarehouseSavedQuery
 from products.data_warehouse.backend.data_load.saved_query_service import trigger_saved_query_schedule
 from products.endpoints.backend.insight_transformers import MaterializedSeriesMismatchError
-from products.endpoints.backend.materialization import ENDPOINT_BREAKDOWN_LIMIT
 from products.endpoints.backend.metrics import (
     ENDPOINT_CACHE_RESULT_TOTAL,
     ENDPOINT_CONCURRENCY_REJECTED_TOTAL,
@@ -62,7 +61,7 @@ from products.endpoints.backend.metrics import (
     ENDPOINT_EXECUTION_DURATION_SECONDS,
     ENDPOINT_EXECUTION_TOTAL,
     ENDPOINT_HOGQL_RESULT_ROWS,
-    ENDPOINT_MATERIALIZED_AGE_SECONDS,
+    ENDPOINT_MATERIALIZED_FRESHNESS_RATIO,
     ENDPOINT_VALIDATION_ERROR_TOTAL,
     query_kind_label,
 )
@@ -75,6 +74,8 @@ from common.hogvm.python.utils import HogVMException
 logger = structlog.get_logger(__name__)
 
 LAST_EXECUTED_THROTTLE = timedelta(minutes=30)
+
+ExecutionType = Literal["materialized", "materialized_fallback", "inline", "ducklake", "ducklake_fallback"]
 
 
 def _emit_endpoint_failure_signal(
@@ -152,8 +153,23 @@ def _emit_endpoint_failure_signal(
                 "error_message": error_msg,
             },
         )
-    except Exception:
-        logger.exception("Failed to emit endpoint failure signal", endpoint_name=endpoint.name)
+    except Exception as signal_exc:
+        logger.exception(
+            "Failed to emit endpoint failure signal",
+            endpoint_name=endpoint.name,
+            team_id=team.id,
+            signal_error_class=type(signal_exc).__name__,
+            signal_error=str(signal_exc),
+        )
+        capture_exception(
+            signal_exc,
+            {
+                "product": Product.ENDPOINTS,
+                "team_id": team.id,
+                "endpoint_name": endpoint.name,
+                "signal_emission": True,
+            },
+        )
 
 
 def _endpoint_refresh_mode_to_refresh_type(
@@ -170,110 +186,32 @@ def _endpoint_refresh_mode_to_refresh_type(
     return RefreshType.FORCE_BLOCKING
 
 
-def _clean_breakdown_sentinels(result: dict) -> None:
-    """Replace breakdown sentinel strings in API response results in-place.
-
-    Handles both list-of-lists (materialized/HogQL) and list-of-dicts (inline insight).
-    If the "Other" sentinel is found, it means the breakdown_limit was exceeded —
-    we clean it to "Other" but also capture_exception for visibility.
-    """
-    rows = result.get("results")
-    if not rows:
-        return
-
-    found_other = False
-    columns = result.get("columns")
-    if columns:
-        # HogQL/materialized path: results are list[tuple] or list[list]
-        indices = [i for i, col in enumerate(columns) if col == "breakdown_value"]
-        if not indices:
-            return
-        for row_idx, row in enumerate(rows):
-            needs_clean = any(isinstance(row[i], (str, list)) or row[i] is None for i in indices)
-            if not needs_clean:
-                continue
-            if not found_other:
-                found_other = any(_value_contains_other(row[i], BREAKDOWN_OTHER_STRING_LABEL) for i in indices)
-            row_list = list(row)
-            for i in indices:
-                row_list[i] = _clean_sentinel_value(row_list[i])
-            rows[row_idx] = type(row)(row_list)
-    elif isinstance(rows[0], dict):
-        # Inline insight path: results are list[dict]
-        for row in rows:
-            if "breakdown_value" in row:
-                if not found_other:
-                    found_other = _value_contains_other(row["breakdown_value"], BREAKDOWN_OTHER_STRING_LABEL)
-                row["breakdown_value"] = _clean_sentinel_value(row["breakdown_value"])
-            if "label" in row:
-                if not found_other and isinstance(row["label"], str):
-                    found_other = BREAKDOWN_OTHER_STRING_LABEL in row["label"]
-                row["label"] = _clean_sentinel_label(row["label"])
-
-    if found_other:
-        capture_exception(
-            Exception(
-                f"Endpoint breakdown limit ({ENDPOINT_BREAKDOWN_LIMIT}) exceeded — 'Other' bucket appeared in results"
-            )
-        )
-
-
-def _value_contains_other(value: object, other_label: str) -> bool:
-    """Check if a breakdown value contains the 'Other' sentinel."""
-    if isinstance(value, str):
-        return value == other_label
-    if isinstance(value, list):
-        return any(item == other_label for item in value if isinstance(item, str))
-    return False
-
-
-def _clean_sentinel_value(value: object) -> object:
-    """Clean breakdown sentinel strings (null and other) in a value or list of values."""
-    if isinstance(value, str):
-        if value == BREAKDOWN_NULL_STRING_LABEL or value == "":
-            return None
-        if value == BREAKDOWN_OTHER_STRING_LABEL:
-            return "Other"
-    elif isinstance(value, list):
-        return [_clean_sentinel_value(item) for item in value]
-    return value
-
-
-def _clean_sentinel_label(label: object) -> object:
-    """Clean a label string containing ::-joined breakdown parts."""
-    if not isinstance(label, str):
-        return label
-    if BREAKDOWN_NULL_STRING_LABEL not in label and BREAKDOWN_OTHER_STRING_LABEL not in label:
-        return label
-    parts = label.split("::")
-    cleaned = [
-        "null" if p == BREAKDOWN_NULL_STRING_LABEL else "Other" if p == BREAKDOWN_OTHER_STRING_LABEL else p
-        for p in parts
-    ]
-    return "::".join(cleaned)
-
-
 class EndpointExecutionService(PydanticModelMixin):
     """Executes an endpoint version, choosing the best execution path."""
 
     def __init__(self, team: Team, request: Request):
         self.team = team
         self.request = request
-        self.user = cast(User, request.user)
+        # request.user may be a synthetic principal (e.g. ProjectSecretAPIKeyUser once
+        # project secret API keys reach endpoints) — only treat real users as such.
+        self.user: User | None = request.user if isinstance(request.user, User) else None
 
     # ------------------------------------------------------------------
     # Validation
     # ------------------------------------------------------------------
 
     def validate_run_request(
-        self, data: EndpointRunRequest, endpoint: Endpoint, version: EndpointVersion | None = None
+        self,
+        data: EndpointRunRequest,
+        endpoint: Endpoint,
+        version: EndpointVersion,
+        offset: int | None = None,
     ) -> None:
-        version = version or endpoint.get_version()
         strategy = strategy_for(endpoint, version, self.team)
 
         is_materialized = bool(version.is_materialized and version.saved_query)
 
-        if version and not version.is_active:
+        if not version.is_active:
             ENDPOINT_VALIDATION_ERROR_TOTAL.labels(reason="inactive_version").inc()
             raise ValidationError(f"Version {version.version} is inactive and cannot be executed.")
 
@@ -286,6 +224,9 @@ class EndpointExecutionService(PydanticModelMixin):
         if data.filters_override is not None:
             if strategy.query_kind == "HogQLQuery":
                 raise ValidationError({"filters_override": "Not allowed for HogQL endpoints. Use variables instead."})
+
+        if offset is not None and not strategy.supports_pagination:
+            raise ValidationError({"offset": "offset is only supported for HogQL endpoints"})
 
         # Validate refresh mode
         if data.refresh == EndpointRefreshMode.DIRECT and not is_materialized:
@@ -324,10 +265,14 @@ class EndpointExecutionService(PydanticModelMixin):
     # ------------------------------------------------------------------
 
     def should_use_materialized_table(
-        self, endpoint: Endpoint, data: EndpointRunRequest, version: EndpointVersion | None = None
+        self, endpoint: Endpoint, data: EndpointRunRequest, version: EndpointVersion
     ) -> bool:
         """
         Decide whether to use materialized table or inline execution.
+
+        Reads materialization state from the DB — the authoritative source. (The redis
+        "materialization ready" cache in rate_limit.py only classifies requests for
+        throttling and is intentionally not consulted here.)
 
         Returns False if:
         - Not materialized
@@ -336,12 +281,11 @@ class EndpointExecutionService(PydanticModelMixin):
         - User overrides present (variables, query)
         - 'direct' mode requested (explicitly bypass materialization)
         """
-        version = version or endpoint.get_version()
         if not version.is_materialized or not version.saved_query:
             return False
 
         saved_query = version.saved_query
-        if saved_query.status not in ["Completed"]:
+        if saved_query.status != DataWarehouseSavedQuery.Status.COMPLETED:
             return False
 
         if not saved_query.table:
@@ -409,87 +353,78 @@ class EndpointExecutionService(PydanticModelMixin):
         Assumes the caller has resolved the version (or established that none was
         requested explicitly) and parsed limit/offset.
         """
-        # Track endpoint execution for deprecation monitoring
-        report_user_action(
-            user=self.user,
-            event="endpoint executed",
-            properties={
-                "endpoint_id": str(endpoint.id),
-                "endpoint_name": endpoint.name,
-                "has_filters_override": bool(data.filters_override),
-                "has_variables": bool(data.variables),
-                "has_limit": data.limit is not None,
-                "has_offset": data.offset is not None,
-                "refresh_mode": data.refresh.value if data.refresh else None,
-            },
-            team=self.team,
-            request=self.request,
-        )
+        if version_obj is None:
+            return Response(
+                {"error": "No version found for this endpoint"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
 
-        self.validate_run_request(data, endpoint, version_obj)
+        self.validate_run_request(data, endpoint, version_obj, offset=offset)
 
-        if offset is not None and version_obj:
-            query_kind = version_obj.query.get("kind")
-            if query_kind != "HogQLQuery":
-                return Response(
-                    {"error": "offset is only supported for HogQL endpoints"},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
+        if self.user is not None:
+            report_user_action(
+                user=self.user,
+                event="endpoint executed",
+                properties={
+                    "endpoint_id": str(endpoint.id),
+                    "endpoint_name": endpoint.name,
+                    "has_filters_override": bool(data.filters_override),
+                    "has_variables": bool(data.variables),
+                    "has_limit": data.limit is not None,
+                    "has_offset": data.offset is not None,
+                    "refresh_mode": data.refresh.value if data.refresh else None,
+                },
+                team=self.team,
+                request=self.request,
+            )
 
         # Check if we should use materialization for this version
         use_materialized = self.should_use_materialized_table(endpoint, data, version_obj)
 
         debug = data.debug or False
-        execution_type = "materialized" if use_materialized else "inline"
-        query_kind_metric = query_kind_label(version_obj.query if version_obj else None)
+        execution_type: ExecutionType = "materialized" if use_materialized else "inline"
+        query_kind_metric = query_kind_label(version_obj.query)
         execution_status: str | None = None
         _start_time = time.monotonic()
 
         try:
+            result: Response | None = None
             if use_materialized:
-                result = self._execute_materialized_endpoint(
-                    endpoint, data, version=version_obj, debug=debug, limit=limit, offset=offset
-                )
-            else:
-                # Use version's query
-                if not version_obj:
-                    return Response(
-                        {"error": "No version found for this endpoint"},
-                        status=status.HTTP_404_NOT_FOUND,
+                try:
+                    result = self._execute_materialized_endpoint(
+                        endpoint, data, version=version_obj, debug=debug, limit=limit, offset=offset
                     )
-                query_to_use = version_obj.query.copy()
+                except ConcurrencyLimitExceeded:
+                    raise
+                except Exception:
+                    # Already logged/captured/signaled inside the materialized path. Serve the
+                    # request from the original query instead of failing — stale tables and
+                    # series drift self-heal on the next materialization run.
+                    execution_type = "materialized_fallback"
+                    result = None
+            elif self._should_use_ducklake(endpoint, version_obj):
+                try:
+                    result = self._execute_ducklake_endpoint(endpoint, version_obj.query.copy(), debug=debug)
+                    execution_type = "ducklake"
+                except Exception:
+                    logger.warning(
+                        "DuckLake execution failed, falling back to inline",
+                        endpoint_name=endpoint.name,
+                    )
+                    ENDPOINT_DUCKLAKE_FALLBACK_TOTAL.inc()
+                    execution_type = "ducklake_fallback"
+                    result = None
 
-                use_ducklake = self._should_use_ducklake(endpoint, version_obj)
-                if use_ducklake:
-                    try:
-                        result = self._execute_ducklake_endpoint(endpoint, query_to_use, debug=debug)
-                        execution_type = "ducklake"
-                    except Exception:
-                        logger.warning(
-                            "DuckLake execution failed, falling back to inline",
-                            endpoint_name=endpoint.name,
-                        )
-                        ENDPOINT_DUCKLAKE_FALLBACK_TOTAL.inc()
-                        execution_type = "ducklake_fallback"
-                        result = self._execute_inline_endpoint(
-                            endpoint,
-                            data,
-                            query_to_use,
-                            version=version_obj,
-                            debug=debug,
-                            limit=limit,
-                            offset=offset,
-                        )
-                else:
-                    result = self._execute_inline_endpoint(
-                        endpoint,
-                        data,
-                        query_to_use,
-                        version=version_obj,
-                        debug=debug,
-                        limit=limit,
-                        offset=offset,
-                    )
+            if result is None:
+                result = self._execute_inline_endpoint(
+                    endpoint,
+                    data,
+                    version_obj.query.copy(),
+                    version=version_obj,
+                    debug=debug,
+                    limit=limit,
+                    offset=offset,
+                )
             execution_status = "success"
         except (ExposedHogQLError, ExposedCHQueryError) as e:
             execution_status = "error"
@@ -514,7 +449,7 @@ class EndpointExecutionService(PydanticModelMixin):
             )
             raise ValidationError("Query resolution failed: unable to resolve table or field references.")
         except ConcurrencyLimitExceeded:
-            ENDPOINT_CONCURRENCY_REJECTED_TOTAL.inc()
+            ENDPOINT_CONCURRENCY_REJECTED_TOTAL.labels(team_id=str(self.team.pk)).inc()
             raise Throttled(detail="Too many concurrent requests. Please try again later.")
         except Exception:
             execution_status = "error"
@@ -534,9 +469,8 @@ class EndpointExecutionService(PydanticModelMixin):
 
         if isinstance(result.data, dict):
             result.data["name"] = endpoint.name
-            if version_obj:
-                result.data["endpoint_version"] = version_obj.version
-                result.data["endpoint_version_created_at"] = version_obj.created_at.isoformat()
+            result.data["endpoint_version"] = version_obj.version
+            result.data["endpoint_version_created_at"] = version_obj.created_at.isoformat()
 
         return result
 
@@ -557,7 +491,7 @@ class EndpointExecutionService(PydanticModelMixin):
         except Exception:
             logger.debug("Failed to record endpoint result metrics", exc_info=True)
 
-    def _track_last_executed(self, endpoint: Endpoint, version_obj: EndpointVersion | None) -> None:
+    def _track_last_executed(self, endpoint: Endpoint, version_obj: EndpointVersion) -> None:
         """Record last execution time (30-minute granularity, personal API key calls only)."""
         if get_query_tag_value("access_method") != "personal_api_key":
             return
@@ -565,9 +499,7 @@ class EndpointExecutionService(PydanticModelMixin):
         if endpoint.last_executed_at is None or (now - endpoint.last_executed_at > LAST_EXECUTED_THROTTLE):
             endpoint.last_executed_at = now
             endpoint.save(update_fields=["last_executed_at"])
-        if version_obj is not None and (
-            version_obj.last_executed_at is None or (now - version_obj.last_executed_at > LAST_EXECUTED_THROTTLE)
-        ):
+        if version_obj.last_executed_at is None or (now - version_obj.last_executed_at > LAST_EXECUTED_THROTTLE):
             version_obj.last_executed_at = now
             version_obj.save(update_fields=["last_executed_at"])
 
@@ -579,7 +511,7 @@ class EndpointExecutionService(PydanticModelMixin):
         self,
         endpoint: Endpoint,
         data: EndpointRunRequest,
-        version: EndpointVersion | None = None,
+        version: EndpointVersion,
         debug: bool = False,
         limit: int | None = None,
         offset: int | None = None,
@@ -587,11 +519,10 @@ class EndpointExecutionService(PydanticModelMixin):
         """Execute against a materialized table in S3."""
         materialized_hogql_query = None
         query_kind = None
+        saved_query = version.saved_query
         try:
-            version = version or endpoint.get_version()
-            if not version.saved_query:
+            if not saved_query:
                 raise ValidationError("No materialized query found for this endpoint")
-            saved_query = version.saved_query
 
             strategy = strategy_for(endpoint, version, self.team)
             query_kind = strategy.query_kind
@@ -629,7 +560,7 @@ class EndpointExecutionService(PydanticModelMixin):
             tag_queries(
                 workload=Workload.ENDPOINTS,
                 warehouse_query=True,
-                endpoint_version=version.version if version else None,
+                endpoint_version=version.version,
             )
 
             # Compute dynamic cache TTL: time remaining until data_freshness window expires
@@ -671,12 +602,14 @@ class EndpointExecutionService(PydanticModelMixin):
                     pagination=pagination,
                 )
 
+            if isinstance(result.data, dict):
+                strategy.clean_response_sentinels(result.data)
+
             try:
                 strategy.transform_materialized_response(result.data, saved_query)
             except MaterializedSeriesMismatchError:
                 # Series drift: query was likely edited after materialization. Trigger a refresh
-                # so the next request succeeds, but fail this one loudly rather than
-                # returning wrong-labeled data.
+                # so future materialized reads succeed; the caller serves this request inline.
                 logger.warning(
                     "Materialized endpoint series mismatch, triggering re-materialization",
                     endpoint_name=endpoint.name,
@@ -685,9 +618,11 @@ class EndpointExecutionService(PydanticModelMixin):
                 trigger_saved_query_schedule(saved_query)
                 raise
 
-            if saved_query.last_run_at:
+            # Freshness relative to the configured target: >1.0 means behind SLA.
+            # Absolute age is meaningless across endpoints with different frequencies.
+            if saved_query.last_run_at and version.data_freshness_seconds:
                 age_seconds = max((timezone.now() - saved_query.last_run_at).total_seconds(), 0.0)
-                ENDPOINT_MATERIALIZED_AGE_SECONDS.observe(age_seconds)
+                ENDPOINT_MATERIALIZED_FRESHNESS_RATIO.observe(age_seconds / version.data_freshness_seconds)
 
             return result
         except Exception as e:
@@ -712,7 +647,7 @@ class EndpointExecutionService(PydanticModelMixin):
                 endpoint,
                 e,
                 materialized=True,
-                version=version.version if version else None,
+                version=version.version,
                 saved_query_id=saved_query.id if saved_query else None,
                 query_kind=query_kind,
                 executed_sql=materialized_hogql_query.query if materialized_hogql_query else None,
@@ -721,7 +656,7 @@ class EndpointExecutionService(PydanticModelMixin):
                     saved_query.last_run_at.isoformat() if saved_query and saved_query.last_run_at else None
                 ),
                 saved_query_columns=saved_query.columns if saved_query else None,
-                endpoint_columns=version.columns if version else None,
+                endpoint_columns=version.columns,
             )
             raise
 
@@ -748,7 +683,7 @@ class EndpointExecutionService(PydanticModelMixin):
         endpoint: Endpoint,
         data: EndpointRunRequest,
         query: dict,
-        version: EndpointVersion | None = None,
+        version: EndpointVersion,
         debug: bool = False,
         limit: int | None = None,
         offset: int | None = None,
@@ -756,8 +691,6 @@ class EndpointExecutionService(PydanticModelMixin):
         """Execute query directly against ClickHouse."""
         strategy: EndpointQueryStrategy | None = None
         try:
-            if version is None:
-                version = endpoint.get_version()
             strategy = strategy_for(endpoint, version, self.team)
 
             query = strategy.prepare_inline_query(query)
@@ -778,10 +711,10 @@ class EndpointExecutionService(PydanticModelMixin):
                 "query": query,
             }
 
-            cache_age = version.data_freshness_seconds if version else None
-            tag_queries(endpoint_version=version.version if version else None)
+            cache_age = version.data_freshness_seconds
+            tag_queries(endpoint_version=version.version)
 
-            return self._execute_query_and_respond(
+            result = self._execute_query_and_respond(
                 query_request_data,
                 data.client_query_id,
                 variables_override=plan.variables_override,
@@ -790,6 +723,11 @@ class EndpointExecutionService(PydanticModelMixin):
                 headers=plan.deprecation_headers,
                 pagination=pagination,
             )
+
+            if isinstance(result.data, dict):
+                strategy.clean_response_sentinels(result.data)
+
+            return result
 
         except Exception as e:
             self.handle_column_ch_error(e)
@@ -812,10 +750,10 @@ class EndpointExecutionService(PydanticModelMixin):
                 endpoint,
                 e,
                 materialized=False,
-                version=version.version if version else None,
+                version=version.version,
                 query_kind=query_kind,
                 executed_sql=query.get("query") if query_kind == "HogQLQuery" else None,
-                endpoint_columns=version.columns if version else None,
+                endpoint_columns=version.columns,
             )
             raise
 
@@ -865,6 +803,11 @@ class EndpointExecutionService(PydanticModelMixin):
     # Query service plumbing
     # ------------------------------------------------------------------
 
+    def _is_interactive_session(self) -> bool:
+        """Whether this request came from the PostHog UI (session auth) rather than a
+        programmatic credential (personal API key, OAuth, project secret API key, ...)."""
+        return isinstance(getattr(self.request, "successful_authenticator", None), SessionAuthentication)
+
     def _execute_query_and_respond(
         self,
         query_request_data: dict,
@@ -879,18 +822,12 @@ class EndpointExecutionService(PydanticModelMixin):
         """Shared query execution logic."""
         merged_data = self.get_model(query_request_data, QueryRequest)
 
-        logger.debug(merged_data)
         query, client_query_id, execution_mode = _process_query_request(
             merged_data, self.team, client_query_id, self.request.user
         )
         self._tag_client_query_id(client_query_id)
-        endpoint_feature = (
-            Feature.ENDPOINT_EXECUTION if get_query_tag_value("access_method") else Feature.ENDPOINT_PLAYGROUND
-        )
+        endpoint_feature = Feature.ENDPOINT_PLAYGROUND if self._is_interactive_session() else Feature.ENDPOINT_EXECUTION
         tag_queries(product=Product.ENDPOINTS, feature=endpoint_feature)
-
-        if execution_mode not in BLOCKING_EXECUTION_MODES:
-            raise ValidationError({"refresh": f"Only sync modes are supported, got: {execution_mode}"})
 
         result = process_query_model(
             self.team,
@@ -929,18 +866,10 @@ class EndpointExecutionService(PydanticModelMixin):
         elif "results" in result:
             result["hasMore"] = False
 
-        _clean_breakdown_sentinels(result)
-
         if "results" in result:
-            results_value = result.pop("results")
-            result = {"results": results_value, **result}
+            result = {"results": result.pop("results"), **result}
 
-        response_status = (
-            status.HTTP_202_ACCEPTED
-            if result.get("query_status") and result["query_status"].get("complete") is False
-            else status.HTTP_200_OK
-        )
-        return Response(result, status=response_status, headers=headers)
+        return Response(result, status=status.HTTP_200_OK, headers=headers)
 
     def handle_column_ch_error(self, error) -> None:
         if getattr(error, "message", None):
