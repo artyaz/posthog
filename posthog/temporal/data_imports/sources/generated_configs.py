@@ -1292,6 +1292,7 @@ class TemporalIOSourceConfig(config.Config):
     client_certificate: str
     client_private_key: str
     encryption_key: str | None = None
+    fallback_decryption_keys: str | None = None
 
 
 @config.config
