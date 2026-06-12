@@ -115,7 +115,8 @@ class ActiveCampaignSourceConfig(config.Config):
 
 @config.config
 class AdRollSourceConfig(config.Config):
-    pass
+    client_id: str
+    personal_access_token: str
 
 
 @config.config
@@ -188,7 +189,8 @@ class AppleSearchAdsSourceConfig(config.Config):
 
 @config.config
 class AppsFlyerSourceConfig(config.Config):
-    pass
+    app_id: str
+    api_token: str
 
 
 @config.config
@@ -262,7 +264,9 @@ class BoxSourceConfig(config.Config):
 
 @config.config
 class BraintreeSourceConfig(config.Config):
-    pass
+    public_key: str
+    private_key: str
+    environment: Literal["production", "sandbox"] = config.value(default="production")
 
 
 @config.config
@@ -380,7 +384,7 @@ class CockroachDBSourceConfig(config.Config):
 
 @config.config
 class CodaSourceConfig(config.Config):
-    pass
+    api_token: str
 
 
 @config.config
@@ -591,7 +595,7 @@ class FrontSourceConfig(config.Config):
 
 @config.config
 class FullStorySourceConfig(config.Config):
-    pass
+    api_key: str
 
 
 @config.config
@@ -858,7 +862,7 @@ class MollieSourceConfig(config.Config):
 
 @config.config
 class MondaySourceConfig(config.Config):
-    pass
+    api_token: str
 
 
 @config.config
@@ -1013,7 +1017,10 @@ class PipedriveSourceConfig(config.Config):
 
 @config.config
 class PlaidSourceConfig(config.Config):
-    pass
+    client_id: str
+    secret: str
+    access_token: str
+    environment: Literal["production", "sandbox"] = config.value(default="production")
 
 
 @config.config
