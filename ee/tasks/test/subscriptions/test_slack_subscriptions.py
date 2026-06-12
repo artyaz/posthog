@@ -104,6 +104,11 @@ class TestSlackSubscriptionsTasks(APIBaseTest):
                         "text": {"type": "plain_text", "text": "Manage Subscription"},
                         "url": f"http://localhost:8010/insights/123456/subscriptions/{self.subscription.id}?utm_source=posthog&utm_campaign=subscription_report&utm_medium=slack",
                     },
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "Ask PostHog about this 🔍"},
+                        "url": "https://posthog.com/docs/slack-app?utm_source=posthog&utm_campaign=subscription_report&utm_medium=slack",
+                    },
                 ],
             },
         ]
@@ -205,6 +210,11 @@ class TestSlackSubscriptionsTasks(APIBaseTest):
                         "type": "button",
                         "text": {"type": "plain_text", "text": "Manage Subscription"},
                         "url": f"http://localhost:8010/dashboard/{self.dashboard.id}/subscriptions/{self.subscription.id}?utm_source=posthog&utm_campaign=subscription_report&utm_medium=slack",
+                    },
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "Ask PostHog about this 🔍"},
+                        "url": "https://posthog.com/docs/slack-app?utm_source=posthog&utm_campaign=subscription_report&utm_medium=slack",
                     },
                 ],
             },
@@ -656,3 +666,56 @@ class TestSlackSummaryNotice(APIBaseTest):
     def test_no_notice_when_under_budget_and_no_summary(self) -> None:
         texts = self._block_texts(change_summary=None, summary_skipped_over_budget=False)
         assert all("AI summary skipped" not in text for text in texts)
+
+
+class TestSlackExploreButton(APIBaseTest):
+    def setUp(self) -> None:
+        from products.slack_app.backend.subscription_explore import REQUIRED_SLACK_SCOPES
+
+        self.required_scopes = REQUIRED_SLACK_SCOPES
+        self.insight = Insight.objects.create(team=self.team, short_id="123456", name="My Test subscription")
+        self.asset = ExportedAsset.objects.create(
+            team=self.team,
+            insight_id=self.insight.id,
+            export_format="image/png",
+            content_location="s3://bucket/test.png",
+        )
+        self.subscription = create_subscription(
+            team=self.team,
+            insight=self.insight,
+            created_by=self.user,
+            target_type="slack",
+            target_value="C12345|#test-channel",
+        )
+
+    def _action_elements(self, integration: Integration | None) -> list[dict]:
+        message = _prepare_slack_message(self.subscription, [self.asset], total_asset_count=1, integration=integration)
+        return [el for block in message.blocks if block.get("type") == "actions" for el in block["elements"]]
+
+    def _make_integration(self, scopes: frozenset[str]) -> Integration:
+        return Integration.objects.create(
+            team=self.team,
+            kind="slack",
+            integration_id="T12345",
+            config={"scope": ",".join(sorted(scopes))},
+            sensitive_config={"access_token": "xoxb-test"},
+        )
+
+    def test_no_explore_button_without_integration(self) -> None:
+        labels = [el["text"]["text"] for el in self._action_elements(None)]
+        assert labels == ["View in PostHog", "Manage Subscription"]
+
+    def test_interactive_button_when_bot_ready(self) -> None:
+        integration = self._make_integration(self.required_scopes)
+        explore = next(el for el in self._action_elements(integration) if "Dive into the data" in el["text"]["text"])
+        assert explore["action_id"] == "subscription_explore_in_thread"
+        assert explore["value"]  # signed token, no url
+        assert "url" not in explore
+
+    def test_link_fallback_when_bot_not_ready(self) -> None:
+        integration = self._make_integration(frozenset({"chat:write"}))  # missing bot scopes
+        explore = next(
+            el for el in self._action_elements(integration) if "Ask PostHog about this" in el["text"]["text"]
+        )
+        assert "url" in explore
+        assert "action_id" not in explore

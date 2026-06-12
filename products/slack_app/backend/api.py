@@ -63,6 +63,14 @@ from products.slack_app.backend.services.integration_resolver import (
     user_resolution_failure_reply,
 )
 from products.slack_app.backend.slack_link_unfurl import handle_posthog_link_unfurl
+from products.slack_app.backend.subscription_explore import (
+    EXPLORE_ACTION_ID,
+    EXPLORE_PROMPT_ACTION_ID,
+    EXPLORE_PROMPT_BLOCK_ID,
+    EXPLORE_VIEW_CALLBACK_ID,
+    REQUIRED_SLACK_SCOPES,
+    decode_explore_token,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -72,26 +80,10 @@ HANDLED_EVENT_TYPES = ["app_mention", "link_shared", "message", "member_joined_c
 # needs, so both surfaces share one kind.
 SLACK_INTEGRATION_KIND = "slack"
 
-# Scopes the coding-agent flow exercises end-to-end. Slack stores the granted scope set
-# per install, so tenants who connected the Slack integration before the full scope set
-# was requested in prod (2026-05-04, #57177) must reconnect before mentions can work.
-#
-# ``member_joined_channel`` (used by the channel-onboarding flow) additionally requires
-# ``channels:read`` and ``groups:read``. Those are in the Slack app manifest but **not**
-# in the required set on purpose: workspaces that connected before the scopes were added
-# keep working — they just don't deliver the join event, so they silently skip the
-# welcome message instead of seeing a "missing scopes" warning.
-POSTHOG_CODE_REQUIRED_SLACK_SCOPES: frozenset[str] = frozenset(
-    {
-        "app_mentions:read",
-        "users:read",
-        "users:read.email",
-        "chat:write",
-        "channels:history",
-        "groups:history",
-        "reactions:write",
-    }
-)
+# Canonical definition lives in ``subscription_explore`` so the subscription send path can
+# share it without importing this module. Re-exported here under the original name to keep
+# existing imports (and tests) working.
+POSTHOG_CODE_REQUIRED_SLACK_SCOPES = REQUIRED_SLACK_SCOPES
 
 # Onboarding-on-join dedupe TTL: just long enough to absorb Slack retries and
 # a near-simultaneous cross-region race during cutover. A real re-add after
@@ -3056,6 +3048,178 @@ def _extract_dismiss_hints(payload: dict) -> int | None:
     return integration_id if isinstance(integration_id, int) else None
 
 
+def _explore_token_from_payload(payload: dict) -> str:
+    """Pull the signed explore token off a 'Dive into the data' click or its modal submit."""
+    for action in payload.get("actions", []) or []:
+        if action.get("action_id") == EXPLORE_ACTION_ID:
+            value = action.get("value")
+            return value if isinstance(value, str) else ""
+    if payload.get("type") == "view_submission":
+        try:
+            meta = json.loads(payload.get("view", {}).get("private_metadata", "{}"))
+        except (json.JSONDecodeError, TypeError):
+            return ""
+        token = meta.get("token")
+        return token if isinstance(token, str) else ""
+    return ""
+
+
+def _extract_explore_hints(payload: dict) -> int | None:
+    """Integration id carried by a 'Dive into the data' click/submit, for region-ownership routing.
+
+    The id rides inside a signed token, so it is tamper-proof; the handlers still confirm it
+    belongs to the clicking Slack workspace before acting on it.
+    """
+    ctx = decode_explore_token(_explore_token_from_payload(payload))
+    if not ctx:
+        return None
+    integration_id = ctx.get("integration_id")
+    return integration_id if isinstance(integration_id, int) else None
+
+
+def _handle_subscription_explore_open(payload: dict) -> HttpResponse:
+    """Open the 'Dive into the data' modal in response to the subscription button click."""
+    trigger_id = payload.get("trigger_id")
+    token = _explore_token_from_payload(payload)
+    ctx = decode_explore_token(token)
+    slack_team_id = payload.get("team", {}).get("id")
+    if not trigger_id or not ctx or not slack_team_id:
+        return HttpResponse(status=200)
+
+    integration = Integration.objects.filter(  # nosemgrep: idor-lookup-without-team
+        id=ctx["integration_id"],  # nosemgrep: idor-taint-user-input-to-model-get
+        kind=SLACK_INTEGRATION_KIND,
+        integration_id=slack_team_id,
+    ).first()
+    if integration is None:
+        return HttpResponse(status=200)
+
+    channel = payload.get("channel", {}).get("id", "")
+    # The subscription message the button hangs off of is the thread root the agent replies under.
+    message_ts = payload.get("message", {}).get("ts") or payload.get("container", {}).get("message_ts", "")
+    resource_name = ctx.get("resource_name", "")
+    private_metadata = json.dumps(
+        {"token": token, "channel": channel, "thread_ts": message_ts, "resource_name": resource_name}
+    )
+
+    try:
+        SlackIntegration(integration).client.views_open(
+            trigger_id=trigger_id, view=_build_explore_modal(private_metadata, resource_name)
+        )
+    except SlackApiError:
+        logger.warning("subscription_explore_views_open_failed", integration_id=integration.id, exc_info=True)
+    return HttpResponse(status=200)
+
+
+def _build_explore_modal(private_metadata: str, resource_name: str) -> dict:
+    heading = (
+        f"Ask PostHog to dig into *{resource_name}* and reply in the thread."
+        if resource_name
+        else "Ask PostHog to dig into this report and reply in the thread."
+    )
+    return {
+        "type": "modal",
+        "callback_id": EXPLORE_VIEW_CALLBACK_ID,
+        "private_metadata": private_metadata,
+        "title": {"type": "plain_text", "text": "Dive into the data"},
+        "submit": {"type": "plain_text", "text": "Ask PostHog"},
+        "close": {"type": "plain_text", "text": "Cancel"},
+        "blocks": [
+            {"type": "section", "text": {"type": "mrkdwn", "text": heading}},
+            {
+                "type": "input",
+                "block_id": EXPLORE_PROMPT_BLOCK_ID,
+                "label": {"type": "plain_text", "text": "What would you like to explore?"},
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": EXPLORE_PROMPT_ACTION_ID,
+                    "multiline": True,
+                    "placeholder": {
+                        "type": "plain_text",
+                        "text": "e.g. What's driving the change since last week? Any notable outliers?",
+                    },
+                },
+            },
+        ],
+    }
+
+
+def _handle_subscription_explore_submit(payload: dict, request: HttpRequest) -> HttpResponse:
+    """On modal submit, kick off the bot in the subscription's thread with the user's question.
+
+    The bot ignores ``app_mention`` events authored by bots (the reply-loop guard), so we can't
+    just post ``@PostHog <prompt>`` as the integration and let Slack re-deliver it. Instead we
+    post the question for visibility, then dispatch a synthesized ``app_mention`` event straight
+    into the normal routing pipeline — which resolves the clicking user, picks the project, and
+    starts the mention workflow exactly as a real mention would.
+    """
+    view = payload.get("view", {})
+    try:
+        meta = json.loads(view.get("private_metadata", "{}"))
+    except (json.JSONDecodeError, TypeError):
+        return HttpResponse(status=200)
+
+    ctx = decode_explore_token(meta.get("token", ""))
+    slack_team_id = payload.get("team", {}).get("id")
+    if not ctx or not slack_team_id:
+        return HttpResponse(status=200)
+
+    integration = Integration.objects.filter(  # nosemgrep: idor-lookup-without-team
+        id=ctx["integration_id"],  # nosemgrep: idor-taint-user-input-to-model-get
+        kind=SLACK_INTEGRATION_KIND,
+        integration_id=slack_team_id,
+    ).first()
+    if integration is None:
+        return HttpResponse(status=200)
+
+    prompt = (
+        (
+            view.get("state", {})
+            .get("values", {})
+            .get(EXPLORE_PROMPT_BLOCK_ID, {})
+            .get(EXPLORE_PROMPT_ACTION_ID, {})
+            .get("value")
+        )
+        or ""
+    ).strip()
+    channel = meta.get("channel", "")
+    thread_ts = meta.get("thread_ts", "")
+    slack_user_id = payload.get("user", {}).get("id", "")
+    if not prompt or not channel or not slack_user_id:
+        return HttpResponse(status=200)
+
+    slack = SlackIntegration(integration)
+    # Post the question so the thread shows what was asked; its ts doubles as the synthesized
+    # event's ts (and therefore the mention workflow's idempotency key).
+    try:
+        posted = slack.client.chat_postMessage(
+            channel=channel,
+            thread_ts=thread_ts or None,
+            text=f":mag: <@{slack_user_id}> asked PostHog to dig in:\n>{prompt}",
+        )
+    except SlackApiError:
+        logger.warning("subscription_explore_post_failed", integration_id=integration.id, exc_info=True)
+        return HttpResponse(status=200)
+
+    event_ts = posted.get("ts")
+    bot_user_id = _get_cached_bot_user_id(slack, integration)
+    mention = f"<@{bot_user_id}> " if bot_user_id else ""
+    synthesized_event = {
+        "type": "app_mention",
+        "user": slack_user_id,
+        "text": f"{mention}{prompt}",
+        "channel": channel,
+        "ts": event_ts,
+        "thread_ts": thread_ts or event_ts,
+    }
+    try:
+        route_posthog_code_event_to_relevant_region(request, synthesized_event, slack_team_id, event_id=event_ts)
+    except Exception:
+        logger.exception("subscription_explore_dispatch_failed", integration_id=integration.id)
+
+    return HttpResponse(status=200)
+
+
 def _handle_signals_dismiss_report(payload: dict) -> HttpResponse:
     """Suppress a signals inbox report when a reviewer clicks 'Dismiss' in Slack."""
     from products.signals.backend.facade.api import (  # noqa: PLC0415 — cross-product action kept off the slack import path
@@ -3191,6 +3355,7 @@ def posthog_code_interactivity_handler(request: HttpRequest) -> HttpResponse:
     hinted_integration_id, hinted_user_id = _extract_picker_hints(payload)
     terminate_integration_id, terminate_user_id = _extract_terminate_hints(payload)
     dismiss_integration_id = _extract_dismiss_hints(payload)
+    explore_integration_id = _extract_explore_hints(payload)
     requesting_user = payload.get("user", {}).get("id", "")
     slack_team_id = payload.get("team", {}).get("id")
 
@@ -3220,6 +3385,14 @@ def posthog_code_interactivity_handler(request: HttpRequest) -> HttpResponse:
         # so this isn't gated on a specific Slack user — only on owning the integration locally.
         local = Integration.objects.filter(  # nosemgrep: idor-lookup-without-team
             id=dismiss_integration_id,  # nosemgrep: idor-taint-user-input-to-model-get
+            kind=SLACK_INTEGRATION_KIND,
+            integration_id=slack_team_id,
+        ).exists()
+    elif slack_team_id and explore_integration_id:
+        # 'Dive into the data' button/modal: the integration id comes from a signed token, so any
+        # member who can see the subscription message may use it — gated only on local ownership.
+        local = Integration.objects.filter(  # nosemgrep: idor-lookup-without-team
+            id=explore_integration_id,  # nosemgrep: idor-taint-user-input-to-model-get
             kind=SLACK_INTEGRATION_KIND,
             integration_id=slack_team_id,
         ).exists()
@@ -3295,9 +3468,14 @@ def posthog_code_interactivity_handler(request: HttpRequest) -> HttpResponse:
     if payload_type == "block_suggestion":
         return _handle_repo_picker_options(payload)
 
+    if payload_type == "view_submission" and payload.get("view", {}).get("callback_id") == EXPLORE_VIEW_CALLBACK_ID:
+        return _handle_subscription_explore_submit(payload, request)
+
     if payload_type == "block_actions":
         actions = payload.get("actions", [])
         for action in actions:
+            if action.get("action_id") == EXPLORE_ACTION_ID:
+                return _handle_subscription_explore_open(payload)
             if action.get("action_id") == "posthog_code_repo_select":
                 return _handle_repo_picker_submit(payload)
             if action.get("action_id") == "posthog_code_repo_none":

@@ -1,0 +1,83 @@
+"""Shared helpers for the subscription "Dive into the data" button.
+
+Kept deliberately dependency-light (Django signing + the Integration model only) so the
+subscription delivery path in ``ee/tasks`` can build the button and decode its click token
+without importing the heavy event-routing module (``api.py``), which pulls in Temporal and
+the rest of the bot pipeline.
+"""
+
+from typing import Any
+
+from django.core import signing
+
+import structlog
+
+from posthog.models.integration import Integration, SlackIntegration
+
+logger = structlog.get_logger(__name__)
+
+# Scopes the conversational bot exercises end-to-end. Slack stores the granted scope set
+# per install, so tenants who connected the Slack integration before the full scope set was
+# requested in prod (2026-05-04, #57177) must reconnect before mentions can work.
+#
+# ``member_joined_channel`` (channel-onboarding) additionally needs ``channels:read`` and
+# ``groups:read``. Those are in the Slack app manifest but **not** in the required set on
+# purpose: workspaces that connected before they were added keep working — they just skip
+# the welcome message instead of seeing a "missing scopes" warning.
+#
+# Lives here (not ``api.py``) so both the event router and the subscription send path can
+# share it without a heavy import. ``api.py`` re-exports it as
+# ``POSTHOG_CODE_REQUIRED_SLACK_SCOPES`` for backwards compatibility.
+REQUIRED_SLACK_SCOPES: frozenset[str] = frozenset(
+    {
+        "app_mentions:read",
+        "users:read",
+        "users:read.email",
+        "chat:write",
+        "channels:history",
+        "groups:history",
+        "reactions:write",
+    }
+)
+
+# action_id on the interactive button + callback_id on the modal it opens.
+EXPLORE_ACTION_ID = "subscription_explore_in_thread"
+EXPLORE_VIEW_CALLBACK_ID = "subscription_explore_submit"
+EXPLORE_PROMPT_BLOCK_ID = "subscription_explore_prompt"
+EXPLORE_PROMPT_ACTION_ID = "prompt"
+
+EXPLORE_TOKEN_SALT = "posthog_code_subscription_explore"
+# Subscription messages linger in a channel — allow a generous window to click through.
+EXPLORE_TOKEN_MAX_AGE_SECONDS = 60 * 60 * 24 * 7
+
+
+def bot_is_ready(integration: Integration) -> bool:
+    """True when this Slack install has every scope the conversational bot needs."""
+    try:
+        return not SlackIntegration(integration).missing_scopes(REQUIRED_SLACK_SCOPES)
+    except Exception:
+        logger.warning("subscription_explore_scope_check_failed", integration_id=integration.id, exc_info=True)
+        return False
+
+
+def make_explore_token(*, integration_id: int, resource_name: str) -> str:
+    """Sign the context needed to safely route a button click back to this install.
+
+    Signed (not a random cache key) so the click survives across the long display window
+    without us holding server state per delivered message. The handler still verifies the
+    decoded ``integration_id`` belongs to the clicking Slack workspace before acting.
+    """
+    return signing.dumps(
+        {"integration_id": integration_id, "resource_name": resource_name},
+        salt=EXPLORE_TOKEN_SALT,
+    )
+
+
+def decode_explore_token(token: str) -> dict[str, Any] | None:
+    if not token:
+        return None
+    try:
+        decoded = signing.loads(token, salt=EXPLORE_TOKEN_SALT, max_age=EXPLORE_TOKEN_MAX_AGE_SECONDS)
+    except signing.BadSignature:
+        return None
+    return decoded if isinstance(decoded, dict) else None
