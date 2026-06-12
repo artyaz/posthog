@@ -780,7 +780,8 @@ class LeverSourceConfig(config.Config):
 
 @config.config
 class LightspeedRetailSourceConfig(config.Config):
-    pass
+    domain_prefix: str
+    api_token: str
 
 
 @config.config
