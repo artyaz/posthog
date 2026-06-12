@@ -22,6 +22,7 @@ from posthog.schema import (
     AlertCondition,
     AlertState,
     DetectorConfig,
+    FunnelsAlertConfig,
     HogQLAlertConfig,
     InsightThreshold,
     TrendsAlertConfig,
@@ -77,12 +78,9 @@ class AlertConditionField(serializers.JSONField):
 
 class AlertConfigUnion(RootModel):
     """Per-insight-kind alert config, discriminated by ``type`` — keeps the OpenAPI (and the
-    generated frontend types and MCP tool schemas) in sync with every kind alerts support.
+    generated frontend types and MCP tool schemas) in sync with every kind alerts support."""
 
-    ``FunnelsAlertConfig`` is deliberately absent until the funnel-alert backend lands; the
-    funnel frontend on this branch is flag-gated and inert."""
-
-    root: Annotated[TrendsAlertConfig | HogQLAlertConfig, PydanticField(discriminator="type")]
+    root: Annotated[TrendsAlertConfig | HogQLAlertConfig | FunnelsAlertConfig, PydanticField(discriminator="type")]
 
 
 @extend_schema_field(AlertConfigUnion)  # type: ignore[arg-type]

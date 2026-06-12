@@ -212,14 +212,31 @@ export interface HogQLAlertConfigApi {
     type: HogQLAlertConfigApiType
 }
 
+export type FunnelConversionMetricApi = (typeof FunnelConversionMetricApi)[keyof typeof FunnelConversionMetricApi]
+
+export const FunnelConversionMetricApi = {
+    ConversionFromStart: 'conversion_from_start',
+    ConversionFromPrevious: 'conversion_from_previous',
+} as const
+
+export type FunnelsAlertConfigApiType = (typeof FunnelsAlertConfigApiType)[keyof typeof FunnelsAlertConfigApiType]
+
+export const FunnelsAlertConfigApiType = {
+    FunnelsAlertConfig: 'FunnelsAlertConfig',
+} as const
+
+export interface FunnelsAlertConfigApi {
+    /** Zero-based step index to evaluate. Null = the last step (overall conversion). */
+    funnel_step?: number | null
+    metric: FunnelConversionMetricApi
+    type: FunnelsAlertConfigApiType
+}
+
 /**
  * Per-insight-kind alert config, discriminated by ``type`` — keeps the OpenAPI (and the
  * generated frontend types and MCP tool schemas) in sync with every kind alerts support.
- *
- * ``FunnelsAlertConfig`` is deliberately absent until the funnel-alert backend lands; the
- * funnel frontend on this branch is flag-gated and inert.
  */
-export type AlertConfigUnionApi = TrendsAlertConfigApi | HogQLAlertConfigApi
+export type AlertConfigUnionApi = TrendsAlertConfigApi | HogQLAlertConfigApi | FunnelsAlertConfigApi
 
 export interface PreprocessingConfigApi {
     /** Order of differencing. 0 = raw values, 1 = first-order diffs (default: 0) */
