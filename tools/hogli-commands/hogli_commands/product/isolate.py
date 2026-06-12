@@ -386,6 +386,13 @@ def execute_move_plan(plan: MovePlan, repo_root: Path = REPO_ROOT, dry_run: bool
             fixed, warnings = absolutize_relative_imports(dst.read_text(), f"products.{name}.backend")
             dst.write_text(fixed)
             log.extend(f"WARNING {dst.relative_to(repo_root)}: {w}" for w in warnings)
+            if "__file__" in fixed:
+                # Found the hard way on logs: explain.py resolved its template dir via
+                # Path(__file__).parent, which silently points elsewhere after the move.
+                log.append(
+                    f"WARNING {dst.relative_to(repo_root)}: uses __file__-relative paths — "
+                    "re-anchor resource paths for the new module depth"
+                )
 
     if plan.tasks_move:
         src, dst = plan.tasks_move
