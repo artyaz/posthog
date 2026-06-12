@@ -22,7 +22,7 @@ from posthog.models.bot_definition.sql import (
 # seed idempotent: re-runs and follow-up re-seeds land on a clean table.
 operations = [
     # Data table on AUX only.
-    run_sql_with_exceptions(SHARDED_BOT_DEFINITION_TABLE_SQL, node_roles=[NodeRole.AUX], sharded=True),
+    run_sql_with_exceptions(SHARDED_BOT_DEFINITION_TABLE_SQL, node_roles=[NodeRole.AUX]),
     # Distributed read table on DATA + AUX, resolving to the AUX data via cluster=AUX.
     run_sql_with_exceptions(BOT_DEFINITION_TABLE_SQL, node_roles=[NodeRole.DATA, NodeRole.AUX]),
     # Seed on AUX only. is_alter_on_replicated_table=True runs the write on one host;
