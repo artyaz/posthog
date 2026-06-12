@@ -2,6 +2,8 @@ import json
 
 from django.test import TestCase
 
+from parameterized import parameterized
+
 from posthog.models.integration import Integration
 from posthog.models.organization import Organization
 from posthog.models.team import Team
@@ -47,28 +49,36 @@ class TestBotIsReady(TestCase):
             sensitive_config={"access_token": "xoxb-test"},
         )
 
-    def test_ready_with_full_scopes(self) -> None:
-        assert bot_is_ready(self._integration(REQUIRED_SLACK_SCOPES)) is True
+    @parameterized.expand(
+        [
+            ("full_scopes", REQUIRED_SLACK_SCOPES, True),
+            ("missing_scopes", frozenset({"chat:write"}), False),
+        ]
+    )
+    def test_bot_is_ready(self, _name: str, scopes: frozenset[str], expected: bool) -> None:
+        assert bot_is_ready(self._integration(scopes)) is expected
 
-    def test_not_ready_when_scopes_missing(self) -> None:
-        assert bot_is_ready(self._integration(frozenset({"chat:write"}))) is False
+
+def _button_click_payload(token: str) -> dict:
+    return {"type": "block_actions", "actions": [{"action_id": EXPLORE_ACTION_ID, "value": token}]}
+
+
+def _view_submission_payload(token: str) -> dict:
+    return {"type": "view_submission", "view": {"private_metadata": json.dumps({"token": token, "channel": "C1"})}}
 
 
 class TestExploreHints(TestCase):
-    def test_token_extracted_from_button_click(self) -> None:
-        token = make_explore_token(integration_id=7, resource_name="r")
-        payload = {"type": "block_actions", "actions": [{"action_id": EXPLORE_ACTION_ID, "value": token}]}
+    @parameterized.expand(
+        [
+            ("button_click", 7, _button_click_payload),
+            ("view_submission", 9, _view_submission_payload),
+        ]
+    )
+    def test_token_extracted(self, _name: str, integration_id: int, build_payload) -> None:
+        token = make_explore_token(integration_id=integration_id, resource_name="r")
+        payload = build_payload(token)
         assert _explore_token_from_payload(payload) == token
-        assert _extract_explore_hints(payload) == 7
-
-    def test_token_extracted_from_view_submission(self) -> None:
-        token = make_explore_token(integration_id=9, resource_name="r")
-        payload = {
-            "type": "view_submission",
-            "view": {"private_metadata": json.dumps({"token": token, "channel": "C1"})},
-        }
-        assert _explore_token_from_payload(payload) == token
-        assert _extract_explore_hints(payload) == 9
+        assert _extract_explore_hints(payload) == integration_id
 
     def test_unrelated_payload_yields_no_hint(self) -> None:
         payload = {"type": "block_actions", "actions": [{"action_id": "posthog_code_repo_select", "value": "x"}]}

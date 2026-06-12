@@ -10,7 +10,7 @@ from products.exports.backend.temporal.subscriptions.ai_subscription.delivery im
     render_ai_email_html,
     send_email_ai_subscription_report,
 )
-from products.slack_app.backend.subscription_explore import EXPLORE_ACTION_ID, REQUIRED_SLACK_SCOPES
+from products.slack_app.backend.subscription_explore import REQUIRED_SLACK_SCOPES
 
 from ee.tasks.subscriptions.slack_subscriptions import SlackMessageData
 
@@ -221,28 +221,22 @@ class TestAIExploreButton:
         labels = [el["text"]["text"] for el in _action_elements(_build_message("A short report."))]
         assert labels == ["Manage subscription"]
 
-    def test_interactive_button_when_bot_ready(self) -> None:
+    @pytest.mark.parametrize(
+        "scopes,label,expected_keys,forbidden_keys",
+        [
+            (REQUIRED_SLACK_SCOPES, "Dive into the data 🔍", {"action_id", "value"}, {"url"}),
+            (frozenset({"chat:write"}), "Ask PostHog about this 🔍", {"url"}, {"action_id"}),
+        ],
+    )
+    def test_explore_button_variant(
+        self, scopes: frozenset[str], label: str, expected_keys: set[str], forbidden_keys: set[str]
+    ) -> None:
         message = _build_ai_slack_message(
-            _mock_subscription(),
-            "A short report.",
-            delivery_id=_DELIVERY_ID,
-            integration=_mock_integration(REQUIRED_SLACK_SCOPES),
+            _mock_subscription(), "A short report.", delivery_id=_DELIVERY_ID, integration=_mock_integration(scopes)
         )
-        explore = next(el for el in _action_elements(message) if "Dive into the data" in el["text"]["text"])
-        assert explore["action_id"] == EXPLORE_ACTION_ID
-        assert explore["value"]  # signed token, no url
-        assert "url" not in explore
-
-    def test_link_fallback_when_bot_not_ready(self) -> None:
-        message = _build_ai_slack_message(
-            _mock_subscription(),
-            "A short report.",
-            delivery_id=_DELIVERY_ID,
-            integration=_mock_integration(frozenset({"chat:write"})),
-        )
-        explore = next(el for el in _action_elements(message) if "Ask PostHog about this" in el["text"]["text"])
-        assert "url" in explore
-        assert "action_id" not in explore
+        explore = next(el for el in _action_elements(message) if el["text"]["text"] == label)
+        assert expected_keys.issubset(explore.keys())
+        assert set(forbidden_keys).isdisjoint(explore.keys())
 
 
 def _feedback_url(feedback: str, source: str) -> str:

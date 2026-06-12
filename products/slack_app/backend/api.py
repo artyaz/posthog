@@ -3425,6 +3425,7 @@ def posthog_code_interactivity_handler(request: HttpRequest) -> HttpResponse:
         has_context=bool(context),
         hinted_integration_id=hinted_integration_id,
         terminate_integration_id=terminate_integration_id,
+        explore_integration_id=explore_integration_id,
         requesting_user=requesting_user,
         hinted_user=hinted_user_id,
         terminate_user=terminate_user_id,

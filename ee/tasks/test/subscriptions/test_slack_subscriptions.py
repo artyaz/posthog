@@ -705,17 +705,20 @@ class TestSlackExploreButton(APIBaseTest):
         labels = [el["text"]["text"] for el in self._action_elements(None)]
         assert labels == ["View in PostHog", "Manage Subscription"]
 
-    def test_interactive_button_when_bot_ready(self) -> None:
-        integration = self._make_integration(self.required_scopes)
-        explore = next(el for el in self._action_elements(integration) if "Dive into the data" in el["text"]["text"])
-        assert explore["action_id"] == "subscription_explore_in_thread"
-        assert explore["value"]  # signed token, no url
-        assert "url" not in explore
-
-    def test_link_fallback_when_bot_not_ready(self) -> None:
-        integration = self._make_integration(frozenset({"chat:write"}))  # missing bot scopes
+    @parameterized.expand(
+        [
+            # bot ready -> interactive button carrying a signed token, no url
+            ("bot_ready", True, "Dive into the data 🔍", {"action_id", "value"}, {"url"}),
+            # bot not set up -> link button to the docs, no action_id
+            ("bot_not_ready", False, "Ask PostHog about this 🔍", {"url"}, {"action_id"}),
+        ]
+    )
+    def test_explore_button_variant(
+        self, _name: str, ready: bool, label: str, expected_keys: set[str], forbidden_keys: set[str]
+    ) -> None:
+        scopes = self.required_scopes if ready else frozenset({"chat:write"})
         explore = next(
-            el for el in self._action_elements(integration) if "Ask PostHog about this" in el["text"]["text"]
+            el for el in self._action_elements(self._make_integration(scopes)) if el["text"]["text"] == label
         )
-        assert "url" in explore
-        assert "action_id" not in explore
+        assert expected_keys.issubset(explore.keys())
+        assert set(forbidden_keys).isdisjoint(explore.keys())
