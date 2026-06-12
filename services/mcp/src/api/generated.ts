@@ -43957,7 +43957,7 @@ export namespace Schemas {
       dateRange?: _TracingDateRange;
       /** Filter by service names. */
       serviceNames?: string[];
-      /** Filter by HTTP status codes. */
+      /** Filter by OTel span status codes (0 Unset, 1 OK, 2 Error) — not HTTP status codes. Use [2] to select error spans. */
       statusCodes?: number[];
       /** Property filters for the count. */
       filterGroup?: _SpanPropertyFilter[];
@@ -43990,7 +43990,7 @@ export namespace Schemas {
       dateRange?: _TracingDateRange;
       /** Filter by service names. */
       serviceNames?: string[];
-      /** Filter by HTTP status codes. */
+      /** Filter by OTel span status codes (0 Unset, 1 OK, 2 Error) — not HTTP status codes. Use [2] to select error spans. */
       statusCodes?: number[];
       /** Column to order by. Defaults to timestamp. Ordering by timestamp paginates via the keyset cursor ('after'); ordering by duration paginates via 'offset'.
        *
