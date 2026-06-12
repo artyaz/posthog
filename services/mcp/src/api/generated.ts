@@ -6240,7 +6240,7 @@ export namespace Schemas {
       orderBy: ErrorTrackingOrderBy;
       /** Sort direction. */
       orderDirection?: OrderDirection2 | null;
-      /** Pending fingerprint issue state updates UNIONed into the fingerprint issue state subquery (V3 only). The backend caps the list at 50 entries; extras are dropped silently. */
+      /** Pending fingerprint issue state updates UNIONed into the fingerprint issue state subquery. The backend caps the list at 50 entries; extras are dropped silently. */
       pendingFingerprintIssueStateUpdates?: ErrorTrackingPendingFingerprintIssueStateUpdate[] | null;
       personId?: string | null;
       response?: ErrorTrackingQueryResponse | null;
@@ -6249,10 +6249,6 @@ export namespace Schemas {
       /** Filter by issue status. */
       status?: ErrorTrackingIssueStatus | string | null;
       tags?: QueryLogTags | null;
-      /** Use V2 query path (ClickHouse postgres connector join instead of separate Postgres queries) */
-      useQueryV2?: boolean | null;
-      /** Use V3 query path (denormalized ClickHouse table, no Postgres joins) */
-      useQueryV3?: boolean | null;
       /** version of the node, used for schema migrations */
       version?: number | null;
       volumeResolution: number;
@@ -14738,11 +14734,53 @@ export namespace Schemas {
       text?: string | null;
     }
 
+    /**
+     * Highest htmlID suffix per element type, e.g. {"u_row": 1, "u_content_text": 2}.
+     */
+    export type EmailTemplateDesignCounters = { [key: string]: unknown };
+
+    export type EmailTemplateDesignBodyRowsItem = { [key: string]: unknown };
+
+    export type EmailTemplateDesignBodyHeadersItem = { [key: string]: unknown };
+
+    export type EmailTemplateDesignBodyFootersItem = { [key: string]: unknown };
+
+    /**
+     * Body-level settings: backgroundColor, contentWidth ('600px'), fontFamily, textColor.
+     */
+    export type EmailTemplateDesignBodyValues = { [key: string]: unknown };
+
+    export type EmailTemplateDesignBody = {
+      /** Any unique string. */
+      id?: string;
+      /** Rows of {id, cells, columns[{id, contents[{id, type, values}], values}], values}. */
+      rows: EmailTemplateDesignBodyRowsItem[];
+      headers?: EmailTemplateDesignBodyHeadersItem[];
+      footers?: EmailTemplateDesignBodyFootersItem[];
+      /** Body-level settings: backgroundColor, contentWidth ('600px'), fontFamily, textColor. */
+      values?: EmailTemplateDesignBodyValues;
+    };
+
+    /**
+     * Design JSON for PostHog's visual email editor — the authoring surface and source of truth. The server renders the sent email from it, and it opens as editable blocks in the editor. Full schema in the designing-email-templates skill.
+     */
+    export type EmailTemplateDesign = {
+      /** Highest htmlID suffix per element type, e.g. {"u_row": 1, "u_content_text": 2}. */
+      counters?: EmailTemplateDesignCounters;
+      /** Design schema version, e.g. 16. */
+      schemaVersion: number;
+      body: EmailTemplateDesignBody;
+    };
+
     export interface EmailTemplate {
+      /** Email subject line. Supports Liquid templating. Required for email-type templates. */
       subject?: string;
+      /** Plain-text fallback body for clients that can't render the email. */
       text?: string;
+      /** Rendered email body — derived from the design at save time. The visual editor's save path supplies it directly; omit it otherwise. */
       html?: string;
-      design?: unknown;
+      /** Design JSON for PostHog's visual email editor — the authoring surface and source of truth. The server renders the sent email from it, and it opens as editable blocks in the editor. Full schema in the designing-email-templates skill. */
+      design?: EmailTemplateDesign;
     }
 
     /**
@@ -23726,24 +23764,50 @@ export namespace Schemas {
       scores: MessageSentimentScores;
     }
 
+    /**
+     * * `liquid` - liquid
+     */
+    export type MessageTemplateContentTemplatingEnum = typeof MessageTemplateContentTemplatingEnum[keyof typeof MessageTemplateContentTemplatingEnum];
+
+
+    export const MessageTemplateContentTemplatingEnum = {
+      Liquid: 'liquid',
+    } as const;
+
     export interface MessageTemplateContent {
-      templating?: HogFunctionTemplatingEnum;
+      /** Templating language for the email content. Always 'liquid' — Liquid tags pass through verbatim.
+       *
+       * * `liquid` - liquid */
+      templating?: MessageTemplateContentTemplatingEnum;
+      /** Email message content. Replaced as a whole on update — send the complete object. */
       email?: EmailTemplate | null;
     }
 
     export interface MessageTemplate {
       readonly id: string;
-      /** @maxLength 400 */
+      /**
+         * Human-readable template name shown in the library.
+         * @maxLength 400
+         */
       name: string;
+      /** What the template is for and when to use it. */
       description?: string;
       readonly created_at: string;
       readonly updated_at: string;
+      /** Template content keyed by channel. Replaced as a whole on update, not merged. */
       content?: MessageTemplateContent;
       readonly created_by: UserBasic;
-      /** @maxLength 24 */
+      /**
+         * Message channel of the template. Currently 'email'.
+         * @maxLength 24
+         */
       type?: string;
-      /** @nullable */
+      /**
+         * Message category ID to file the template under. Must belong to the same project.
+         * @nullable
+         */
       message_category?: string | null;
+      /** Soft-delete flag. Set true to remove the template from the library. */
       deleted?: boolean;
     }
 
@@ -31677,17 +31741,29 @@ export namespace Schemas {
 
     export interface PatchedMessageTemplate {
       readonly id?: string;
-      /** @maxLength 400 */
+      /**
+         * Human-readable template name shown in the library.
+         * @maxLength 400
+         */
       name?: string;
+      /** What the template is for and when to use it. */
       description?: string;
       readonly created_at?: string;
       readonly updated_at?: string;
+      /** Template content keyed by channel. Replaced as a whole on update, not merged. */
       content?: MessageTemplateContent;
       readonly created_by?: UserBasic;
-      /** @maxLength 24 */
+      /**
+         * Message channel of the template. Currently 'email'.
+         * @maxLength 24
+         */
       type?: string;
-      /** @nullable */
+      /**
+         * Message category ID to file the template under. Must belong to the same project.
+         * @nullable
+         */
       message_category?: string | null;
+      /** Soft-delete flag. Set true to remove the template from the library. */
       deleted?: boolean;
     }
 
@@ -43919,7 +43995,7 @@ export namespace Schemas {
       rootSpans?: boolean;
       /** Number of child spans to prefetch per trace (1-100). */
       prefetchSpans?: number;
-      /** Omit the per-span attributes map from results to keep payloads compact. Defaults to false. */
+      /** Omit the per-span attributes and resource attributes maps from results to keep payloads compact. Defaults to false. */
       excludeAttributes?: boolean;
     }
 
@@ -43931,7 +44007,7 @@ export namespace Schemas {
     export interface _TracingTraceRequest {
       /** Date range for the query. Defaults to last 24 hours. */
       dateRange?: _TracingDateRange;
-      /** Omit the per-span attributes map from results to keep payloads compact. Defaults to false. */
+      /** Omit the per-span attributes and resource attributes maps from results to keep payloads compact. Defaults to false. */
       excludeAttributes?: boolean;
     }
 
