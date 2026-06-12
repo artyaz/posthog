@@ -10,6 +10,7 @@ from products.exports.backend.temporal.subscriptions.ai_subscription.delivery im
     render_ai_email_html,
     send_email_ai_subscription_report,
 )
+from products.slack_app.backend.subscription_explore import EXPLORE_ACTION_ID, REQUIRED_SLACK_SCOPES
 
 from ee.tasks.subscriptions.slack_subscriptions import SlackMessageData
 
@@ -200,6 +201,48 @@ class TestBuildAISlackMessage:
         for thread_msg in message.thread_messages:
             for block in thread_msg["blocks"]:
                 assert block["text"]["text"].strip(), "thread section text must be non-empty"
+
+
+def _mock_integration(scopes: frozenset[str]) -> MagicMock:
+    integration = MagicMock()
+    integration.kind = "slack"
+    integration.id = 7
+    integration.config = {"scope": ",".join(sorted(scopes))}
+    integration.sensitive_config = {"access_token": "xoxb-test"}
+    return integration
+
+
+def _action_elements(message: SlackMessageData) -> list[dict]:
+    return [el for block in message.blocks if block.get("type") == "actions" for el in block["elements"]]
+
+
+class TestAIExploreButton:
+    def test_no_explore_button_without_integration(self) -> None:
+        labels = [el["text"]["text"] for el in _action_elements(_build_message("A short report."))]
+        assert labels == ["Manage subscription"]
+
+    def test_interactive_button_when_bot_ready(self) -> None:
+        message = _build_ai_slack_message(
+            _mock_subscription(),
+            "A short report.",
+            delivery_id=_DELIVERY_ID,
+            integration=_mock_integration(REQUIRED_SLACK_SCOPES),
+        )
+        explore = next(el for el in _action_elements(message) if "Dive into the data" in el["text"]["text"])
+        assert explore["action_id"] == EXPLORE_ACTION_ID
+        assert explore["value"]  # signed token, no url
+        assert "url" not in explore
+
+    def test_link_fallback_when_bot_not_ready(self) -> None:
+        message = _build_ai_slack_message(
+            _mock_subscription(),
+            "A short report.",
+            delivery_id=_DELIVERY_ID,
+            integration=_mock_integration(frozenset({"chat:write"})),
+        )
+        explore = next(el for el in _action_elements(message) if "Ask PostHog about this" in el["text"]["text"])
+        assert "url" in explore
+        assert "action_id" not in explore
 
 
 def _feedback_url(feedback: str, source: str) -> str:

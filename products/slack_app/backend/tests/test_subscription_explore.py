@@ -6,7 +6,12 @@ from posthog.models.integration import Integration
 from posthog.models.organization import Organization
 from posthog.models.team import Team
 
-from products.slack_app.backend.api import _build_explore_modal, _explore_token_from_payload, _extract_explore_hints
+from products.slack_app.backend.api import (
+    _build_explore_modal,
+    _escape_slack_text,
+    _explore_token_from_payload,
+    _extract_explore_hints,
+)
 from products.slack_app.backend.subscription_explore import (
     EXPLORE_ACTION_ID,
     EXPLORE_VIEW_CALLBACK_ID,
@@ -69,6 +74,19 @@ class TestExploreHints(TestCase):
         payload = {"type": "block_actions", "actions": [{"action_id": "posthog_code_repo_select", "value": "x"}]}
         assert _explore_token_from_payload(payload) == ""
         assert _extract_explore_hints(payload) is None
+
+    def test_view_submission_with_null_view_does_not_raise(self) -> None:
+        # This runs on every interactivity payload; a null `view` must not blow up the handler.
+        assert _explore_token_from_payload({"type": "view_submission", "view": None}) == ""
+        assert _extract_explore_hints({"type": "view_submission", "view": None}) is None
+
+
+class TestEscapeSlackText(TestCase):
+    def test_escapes_reserved_chars_so_mentions_do_not_expand(self) -> None:
+        assert _escape_slack_text("ping <!channel> & <@U123>") == "ping &lt;!channel&gt; &amp; &lt;@U123&gt;"
+
+    def test_plain_text_unchanged(self) -> None:
+        assert _escape_slack_text("what drove the spike?") == "what drove the spike?"
 
 
 class TestBuildExploreModal(TestCase):

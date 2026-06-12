@@ -50,6 +50,9 @@ EXPLORE_TOKEN_SALT = "posthog_code_subscription_explore"
 # Subscription messages linger in a channel — allow a generous window to click through.
 EXPLORE_TOKEN_MAX_AGE_SECONDS = 60 * 60 * 24 * 7
 
+# Docs page explaining how to invite/enable the @PostHog bot in a channel.
+BOT_SETUP_DOCS_URL = "https://posthog.com/docs/slack-app"
+
 
 def bot_is_ready(integration: Integration) -> bool:
     """True when this Slack install has every scope the conversational bot needs."""
@@ -78,6 +81,41 @@ def decode_explore_token(token: str) -> dict[str, Any] | None:
         return None
     try:
         decoded = signing.loads(token, salt=EXPLORE_TOKEN_SALT, max_age=EXPLORE_TOKEN_MAX_AGE_SECONDS)
+    except signing.SignatureExpired:
+        # Token outlived the display window — same outcome as a bad signature, but called out
+        # explicitly to match the existing _decode_picker_context idiom in api.py.
+        return None
     except signing.BadSignature:
         return None
     return decoded if isinstance(decoded, dict) else None
+
+
+def build_explore_button(
+    integration: Integration | None, *, resource_name: str, utm_tags: str
+) -> dict[str, Any] | None:
+    """A Slack ``actions`` element inviting the channel to ask @PostHog about this report in-thread.
+
+    The conversational bot is GA, so rather than hide the entry point when it isn't set up we
+    nudge the user to enable it:
+    - Bot fully scoped -> an interactive button that opens the "Dive into the data" modal.
+    - Slack connected but bot not invited / missing scopes -> a link button pointing at the docs.
+
+    Returns ``None`` only when there's no Slack integration at all (nothing to attach to). Shared
+    by both the insight/dashboard and AI subscription delivery paths so the button stays identical.
+    """
+    if integration is None:
+        return None
+    if bot_is_ready(integration):
+        return {
+            "type": "button",
+            "action_id": EXPLORE_ACTION_ID,
+            "text": {"type": "plain_text", "text": "Dive into the data 🔍"},
+            "value": make_explore_token(integration_id=integration.id, resource_name=resource_name),
+        }
+    # Pure link button (no action_id) — matches the existing link buttons and is acked by the
+    # interactivity handler's catch-all 200.
+    return {
+        "type": "button",
+        "text": {"type": "plain_text", "text": "Ask PostHog about this 🔍"},
+        "url": f"{BOT_SETUP_DOCS_URL}?{utm_tags}",
+    }

@@ -13,7 +13,7 @@ from posthog.utils import absolute_uri
 
 from products.exports.backend.models.exported_asset import ExportedAsset
 from products.exports.backend.models.subscription import Subscription
-from products.slack_app.backend.subscription_explore import EXPLORE_ACTION_ID, bot_is_ready, make_explore_token
+from products.slack_app.backend.subscription_explore import build_explore_button
 
 from ee.tasks.subscriptions.subscription_utils import ASSET_GENERATION_FAILED_MESSAGE, UTM_TAGS_BASE, _has_asset_failed
 
@@ -116,38 +116,6 @@ def get_slack_integration_for_team(team_id: int) -> Integration | None:
     return Integration.objects.filter(team_id=team_id, kind="slack").first()
 
 
-# Docs page explaining how to invite/enable the @PostHog bot in a channel.
-_BOT_SETUP_DOCS_URL = "https://posthog.com/docs/slack-app"
-
-
-def _explore_button(integration: Integration | None, resource_info, utm_tags: str) -> dict | None:
-    """Button that invites the channel to ask @PostHog to dig into this report in-thread.
-
-    The conversational bot is GA, so rather than hide the entry point when it isn't set up we
-    nudge the user to enable it:
-    - Bot fully scoped -> an interactive button that opens the "Dive into the data" modal.
-    - Slack connected but bot not invited / missing scopes -> a link button pointing at the
-      setup docs.
-    Returns ``None`` only when there's no Slack integration at all (nothing to attach to).
-    """
-    if integration is None:
-        return None
-    if bot_is_ready(integration):
-        return {
-            "type": "button",
-            "action_id": EXPLORE_ACTION_ID,
-            "text": {"type": "plain_text", "text": "Dive into the data 🔍"},
-            "value": make_explore_token(integration_id=integration.id, resource_name=resource_info.name),
-        }
-    # Pure link button (no action_id) — matches the existing link buttons and is acked by the
-    # interactivity handler's catch-all 200.
-    return {
-        "type": "button",
-        "text": {"type": "plain_text", "text": "Ask PostHog about this 🔍"},
-        "url": f"{_BOT_SETUP_DOCS_URL}?{utm_tags}",
-    }
-
-
 def send_slack_subscription_report(
     subscription: Subscription,
     assets: list[ExportedAsset],
@@ -239,7 +207,7 @@ def _prepare_slack_message(
         },
     ]
 
-    explore_button = _explore_button(integration, resource_info, utm_tags)
+    explore_button = build_explore_button(integration, resource_name=resource_info.name, utm_tags=utm_tags)
     if explore_button:
         action_elements.append(explore_button)
 

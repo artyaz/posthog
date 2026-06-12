@@ -3055,8 +3055,10 @@ def _explore_token_from_payload(payload: dict) -> str:
             value = action.get("value")
             return value if isinstance(value, str) else ""
     if payload.get("type") == "view_submission":
+        # `view` may be absent or explicitly null on odd payloads — coerce to {} either way. This
+        # runs on every interactivity request, so it must never raise on an unrelated payload shape.
         try:
-            meta = json.loads(payload.get("view", {}).get("private_metadata", "{}"))
+            meta = json.loads((payload.get("view") or {}).get("private_metadata", "{}"))
         except (json.JSONDecodeError, TypeError):
             return ""
         token = meta.get("token")
@@ -3077,21 +3079,29 @@ def _extract_explore_hints(payload: dict) -> int | None:
     return integration_id if isinstance(integration_id, int) else None
 
 
-def _handle_subscription_explore_open(payload: dict) -> HttpResponse:
-    """Open the 'Dive into the data' modal in response to the subscription button click."""
-    trigger_id = payload.get("trigger_id")
-    token = _explore_token_from_payload(payload)
+def _resolve_explore_integration(token: str, slack_team_id: str | None) -> tuple[Integration, dict] | tuple[None, None]:
+    """Decode an explore token and return the locally-owned Slack integration it points at (plus the
+    decoded context). Returns ``(None, None)`` when the token is bad/expired, the team is missing, or
+    the integration isn't owned by the clicking workspace."""
     ctx = decode_explore_token(token)
-    slack_team_id = payload.get("team", {}).get("id")
-    if not trigger_id or not ctx or not slack_team_id:
-        return HttpResponse(status=200)
-
+    if not ctx or not slack_team_id:
+        return None, None
     integration = Integration.objects.filter(  # nosemgrep: idor-lookup-without-team
         id=ctx["integration_id"],  # nosemgrep: idor-taint-user-input-to-model-get
         kind=SLACK_INTEGRATION_KIND,
         integration_id=slack_team_id,
     ).first()
     if integration is None:
+        return None, None
+    return integration, ctx
+
+
+def _handle_subscription_explore_open(payload: dict) -> HttpResponse:
+    """Open the 'Dive into the data' modal in response to the subscription button click."""
+    trigger_id = payload.get("trigger_id")
+    token = _explore_token_from_payload(payload)
+    integration, ctx = _resolve_explore_integration(token, payload.get("team", {}).get("id"))
+    if not trigger_id or integration is None:
         return HttpResponse(status=200)
 
     channel = payload.get("channel", {}).get("id", "")
@@ -3144,6 +3154,12 @@ def _build_explore_modal(private_metadata: str, resource_name: str) -> dict:
     }
 
 
+def _escape_slack_text(text: str) -> str:
+    """Escape Slack's three reserved characters so user-supplied text can't inject markup or
+    mentions (e.g. ``<!channel>``, ``<@U…>``) when interpolated into a message ``text`` field."""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 def _handle_subscription_explore_submit(payload: dict, request: HttpRequest) -> HttpResponse:
     """On modal submit, kick off the bot in the subscription's thread with the user's question.
 
@@ -3159,27 +3175,17 @@ def _handle_subscription_explore_submit(payload: dict, request: HttpRequest) -> 
     except (json.JSONDecodeError, TypeError):
         return HttpResponse(status=200)
 
-    ctx = decode_explore_token(meta.get("token", ""))
     slack_team_id = payload.get("team", {}).get("id")
-    if not ctx or not slack_team_id:
-        return HttpResponse(status=200)
-
-    integration = Integration.objects.filter(  # nosemgrep: idor-lookup-without-team
-        id=ctx["integration_id"],  # nosemgrep: idor-taint-user-input-to-model-get
-        kind=SLACK_INTEGRATION_KIND,
-        integration_id=slack_team_id,
-    ).first()
+    integration, _ = _resolve_explore_integration(meta.get("token", ""), slack_team_id)
     if integration is None:
         return HttpResponse(status=200)
 
     prompt = (
-        (
-            view.get("state", {})
-            .get("values", {})
-            .get(EXPLORE_PROMPT_BLOCK_ID, {})
-            .get(EXPLORE_PROMPT_ACTION_ID, {})
-            .get("value")
-        )
+        view.get("state", {})
+        .get("values", {})
+        .get(EXPLORE_PROMPT_BLOCK_ID, {})
+        .get(EXPLORE_PROMPT_ACTION_ID, {})
+        .get("value")
         or ""
     ).strip()
     channel = meta.get("channel", "")
@@ -3188,20 +3194,34 @@ def _handle_subscription_explore_submit(payload: dict, request: HttpRequest) -> 
     if not prompt or not channel or not slack_user_id:
         return HttpResponse(status=200)
 
+    # Gate on PostHog org membership before anything visible happens. Mirrors the dismiss handler
+    # and stops a workspace member with no PostHog access (e.g. an external user in a Slack Connect
+    # channel) from making the bot post an attributed message or run the agent.
+    if _is_org_member(integration, slack_user_id) is None:
+        logger.info("subscription_explore_not_org_member", integration_id=integration.id)
+        return HttpResponse(status=200)
+
     slack = SlackIntegration(integration)
     # Post the question so the thread shows what was asked; its ts doubles as the synthesized
-    # event's ts (and therefore the mention workflow's idempotency key).
+    # event's ts (and therefore the mention workflow's idempotency key). Escape the prompt so a
+    # `<@user>` / `<!channel>` typed into it can't expand into real Slack mentions in our post.
     try:
         posted = slack.client.chat_postMessage(
             channel=channel,
             thread_ts=thread_ts or None,
-            text=f":mag: <@{slack_user_id}> asked PostHog to dig in:\n>{prompt}",
+            text=f":mag: <@{slack_user_id}> asked PostHog to dig in:\n>{_escape_slack_text(prompt)}",
         )
     except SlackApiError:
         logger.warning("subscription_explore_post_failed", integration_id=integration.id, exc_info=True)
         return HttpResponse(status=200)
 
     event_ts = posted.get("ts")
+    if not isinstance(event_ts, str) or not event_ts:
+        # No usable message ts means no idempotency key for the synthesized mention — bail rather
+        # than dispatch an event with a None ts that would collide across concurrent submits.
+        logger.warning("subscription_explore_no_message_ts", integration_id=integration.id)
+        return HttpResponse(status=200)
+
     bot_user_id = _get_cached_bot_user_id(slack, integration)
     mention = f"<@{bot_user_id}> " if bot_user_id else ""
     synthesized_event = {
