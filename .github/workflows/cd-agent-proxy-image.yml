@@ -1,12 +1,3 @@
-#
-# Build and push the agent-proxy container image.
-#
-# Standalone Hono / Node.js streaming-plane service (resumable SSE read +
-# sandbox NDJSON ingest) built from services/agent-proxy/Dockerfile. The image
-# is published to ghcr.io/posthog/posthog-agent-proxy (+ ECR), then a
-# repository_dispatch updates PostHog/charts (release "agent-proxy") so it rolls
-# out to the EU + US clusters. Mirrors cd-mcp-image.yml.
-#
 name: Agent Proxy Container Image CD
 
 on:
@@ -21,11 +12,6 @@ on:
 jobs:
     build:
         name: Build and push container image
-        # Trusted events only. This job checks out the ref and runs the local docker-meta
-        # action with registry credentials and id-token: write, so it must never execute on
-        # PR-controlled code (a labeled PR could modify the local action or build inputs to
-        # exfiltrate publishing credentials). Image build/push happens on master push and
-        # manual dispatch; PRs are validated by the separate Agent Proxy checks workflow.
         if: |
             github.repository == 'PostHog/posthog' && (
                 github.event_name == 'push' ||
@@ -65,16 +51,7 @@ jobs:
               id: push
               uses: depot/build-push-action@5f3b3c2e5a00f0093de47f657aeaefcedff27d18 # v1.17.0
               with:
-                  # Dedicated Depot project for agent-proxy builds, supplied via the
-                  # AGENT_PROXY_DEPOT_PROJECT_ID repository variable so the ID is not
-                  # hardcoded. Create the project at depot.dev (PostHog org) and set the
-                  # variable in repo settings; it must differ from mcp and llm-gateway so
-                  # build caches stay isolated per service. This build job only runs on
-                  # master pushes or PRs labeled build-agent-proxy-image.
                   project: ${{ vars.AGENT_PROXY_DEPOT_PROJECT_ID }}
-                  # No context override: the Dockerfile copies pnpm-lock.yaml,
-                  # pnpm-workspace.yaml and patches/ from the repo root, so the build
-                  # context must be the workspace root (the action's default).
                   file: ./services/agent-proxy/Dockerfile
                   buildx-fallback: false
                   push: ${{ github.ref == 'refs/heads/master' }}

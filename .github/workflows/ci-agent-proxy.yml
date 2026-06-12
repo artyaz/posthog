@@ -1,11 +1,3 @@
-# Typecheck, tests, lint and format checks for the agent-proxy service
-# (services/agent-proxy/). It is a standalone Hono / Node.js service with no
-# runtime dependency on the Django backend, so it runs outside Backend CI —
-# only Node + pnpm are needed.
-#
-# The `agent_proxy_ci` roll-up is the job to mark required in branch
-# protection: extra check jobs can be added to its `needs` without
-# reconfiguring required checks in the GitHub UI.
 name: Agent Proxy CI
 
 on:
@@ -41,7 +33,7 @@ jobs:
                   private-key: ${{ secrets.GH_APP_POSTHOG_PATHS_FILTER_PRIVATE_KEY }}
             - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
               id: filter
-              if: github.event_name != 'push' # Run all checks on master push
+              if: github.event_name != 'push'
               with:
                   token: ${{ steps.app-token.outputs.token || github.token }}
                   filters: |
@@ -76,7 +68,6 @@ jobs:
 
             - name: Test
               working-directory: services/agent-proxy
-              # The `test` script is `vitest` (watch mode); CI needs a single run.
               run: pnpm exec vitest run
 
             - name: Lint
@@ -87,8 +78,6 @@ jobs:
               working-directory: services/agent-proxy
               run: pnpm exec oxfmt --check 'src/**/*.ts' 'tests/**/*.ts' 'scripts/**/*.ts'
 
-    # Single required status check for branch protection. Add future agent-proxy
-    # check jobs to `needs` here rather than reconfiguring GitHub.
     agent_proxy_ci:
         needs: [changes, agent-proxy]
         name: Agent Proxy CI Pass
