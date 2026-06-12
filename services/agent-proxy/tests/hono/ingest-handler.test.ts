@@ -287,6 +287,7 @@ function makeConfig(overrides?: Partial<Config>): Config {
         agentProxyCallbackSecret: '',
         maxConcurrentStreams: 1000,
         maxStreamsPerRun: 25,
+        metricsToken: '',
         port: 8003,
         host: '0.0.0.0',
         shutdownGraceMs: 300_000,

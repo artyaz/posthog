@@ -31,13 +31,17 @@ const mockHistogram = {
 }
 
 vi.mock('@/hono/metrics.js', () => ({
-    register: { metrics: vi.fn().mockResolvedValue('') },
+    register: {
+        metrics: vi.fn().mockResolvedValue(''),
+        contentType: 'text/plain; version=0.0.4; charset=utf-8',
+    },
     routeLabel: vi.fn((p: string) => p),
     taskRunStreamConnectionsOpenedTotal: mockCounter,
     taskRunStreamConnectionsClosedTotal: mockCounter,
     taskRunStreamConnectionDurationSeconds: mockHistogram,
     taskRunStreamLengthOnConnect: mockHistogram,
     taskRunStreamResumeGapTotal: mockCounter,
+    taskRunStreamConnectionsRejectedTotal: mockCounter,
     streamIngestEventsTotal: mockCounter,
     httpRequestsTotal: mockCounter,
     httpRequestDurationSeconds: mockHistogram,
@@ -48,5 +52,6 @@ vi.mock('@/hono/metrics.js', () => ({
     observeStreamConnectionClosed: vi.fn(),
     observeStreamLengthOnConnect: vi.fn(),
     observeStreamResumeGap: vi.fn(),
+    observeStreamConnectionRejected: vi.fn(),
     observeStreamIngestEvents: vi.fn(),
 }))

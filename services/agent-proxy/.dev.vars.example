@@ -60,6 +60,12 @@ AGENT_PROXY_MAX_CONCURRENT_STREAMS=1000
 # stream-read token cannot exhaust the pod-wide budget. Optional; default 25.
 AGENT_PROXY_MAX_STREAMS_PER_RUN=25
 
+# Bearer token required to scrape GET /_metrics. The agent-proxy host is
+# publicly reachable, so set this in production to keep operational metrics
+# internal (scrape with: Authorization: Bearer <token>). Optional; empty
+# leaves the route open (local dev).
+AGENT_PROXY_METRICS_TOKEN=
+
 # TCP bind address. Optional; default 0.0.0.0 (all interfaces).
 HOST=0.0.0.0
 

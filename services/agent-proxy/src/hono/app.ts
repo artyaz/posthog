@@ -58,7 +58,7 @@ export function createApp(redis: Redis, config: Config, publicKeys: CryptoKey[])
     app.options('*', corsPreflightHandler(config))
 
     // -- Health, readiness, metrics --
-    registerPublicRoutes(app, lifecycle)
+    registerPublicRoutes(app, lifecycle, config.metricsToken)
 
     // -- SSE stream read --
     app.get('/v1/runs/:run/stream', async (c) => {

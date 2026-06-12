@@ -10,6 +10,7 @@
 //   TASKS_AGENT_PROXY_CORS_ORIGINS      — comma-separated origins; '' disables CORS
 //   AGENT_PROXY_MAX_CONCURRENT_STREAMS  — default 1000; per-pod cap on open SSE streams
 //   AGENT_PROXY_MAX_STREAMS_PER_RUN     — default 25; per-run cap on open SSE streams
+//   AGENT_PROXY_METRICS_TOKEN           — default ''; bearer token required by /_metrics when set
 //   PORT                                — default 8003
 //   HOST                                — default '0.0.0.0'
 //   SHUTDOWN_GRACE_MS                   — default 300000 (5 min)
@@ -35,6 +36,9 @@ export interface Config {
     // not be able to exhaust the pod).
     maxConcurrentStreams: number
     maxStreamsPerRun: number
+    // Bearer token required to scrape /_metrics. This host is publicly reachable, so set the
+    // token in production to keep operational metrics internal. Empty leaves the route open.
+    metricsToken: string
     port: number
     host: string
     shutdownGraceMs: number
@@ -102,6 +106,8 @@ export function loadConfig(): Config {
         process.exit(1)
     }
 
+    const metricsToken = getEnv('AGENT_PROXY_METRICS_TOKEN') ?? ''
+
     const corsOrigins = parseCorsOrigins(getEnv('TASKS_AGENT_PROXY_CORS_ORIGINS') ?? '')
 
     const portRaw = getEnv('PORT')
@@ -126,6 +132,7 @@ export function loadConfig(): Config {
         agentProxyCallbackSecret,
         maxConcurrentStreams,
         maxStreamsPerRun,
+        metricsToken,
         port,
         host,
         shutdownGraceMs,
